@@ -49,6 +49,8 @@ export type ClaimAnalysis = {
   reasoning: string[];
   conditions: string[];
   citations: ClaimCitation[];
+  /** 推理里最后算出的金额；与 payable 不一致时，界面要提示以推理为准核对 */
+  payableInReasoning: number | null;
   /** 引文反查失败被丢弃的条数 */
   rejected: number;
   tokens: number;
@@ -73,8 +75,9 @@ function systemPrompt(): string {
     "1. 只用给出的条款原文，不得引入条款以外的知识，不得假设没给出的信息（如医院等级、是否合理且必要）；",
     "2. 金额一律用人民币元、只填数字；推不出确切金额就填 null，不要编；",
     "3. 每条结论都要有 citations，quote 必须逐字摘自条款原文，不得改写、不得拼接；找不到原文就别写这条结论；",
-    "4. 条款信息不足或互相矛盾时，verdict 用 uncertain，并在 reasoning 里写清楚缺什么；",
-    "5. 不做医疗建议，不评价产品好坏。",
+    "4. 分段比例必须逐段算（如余额 20000 元：5000×80% + 15000×100%），payable 必须等于推理里最后算出的数字；两者不一致会被判为无效；",
+    "5. 条款信息不足或互相矛盾时，verdict 用 uncertain，并在 reasoning 里写清楚缺什么；",
+    "6. 不做医疗建议，不评价产品好坏。",
     "verdict 只能取：covered（可以赔）、partly（部分可赔或有扣减）、not_covered（不赔）、uncertain（条款不足以判断）。",
     '输出格式：{"verdict":"partly","payable":19000,"reasoning":["..."],"conditions":["..."],"citations":[{"clause_no":"附表1","quote":"..."}]}',
   ].join("\n");
@@ -150,6 +153,16 @@ function asText(value: unknown, limit: number): string {
   return typeof value === "string" ? value.trim().slice(0, limit) : "";
 }
 
+/** 推理里最后提到的金额（「400万元」这种带万字的不算，避免把限额当成结论）。 */
+export function lastAmountInReasoning(lines: string[]): number | null {
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const matches = [...lines[i].matchAll(/(\d[\d,]*(?:\.\d+)?)\s*元/g)];
+    const last = matches[matches.length - 1];
+    if (last) return Number(last[1].replace(/,/g, ""));
+  }
+  return null;
+}
+
 function asList(value: unknown, limit: number): string[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -215,7 +228,14 @@ export function normalizeClaimAnalysis(
     });
   }
 
-  return { verdict, payable, reasoning, conditions, citations, rejected };
+  const reasoningAmount = lastAmountInReasoning(reasoning);
+  // 模型自己前后不一致时不要替它圆场，交给界面提示对照
+  const payableInReasoning =
+    payable !== null && reasoningAmount !== null && Math.abs(payable - reasoningAmount) > 0.5
+      ? reasoningAmount
+      : null;
+
+  return { verdict, payable, reasoning, conditions, citations, rejected, payableInReasoning };
 }
 
 export async function analyzeClaim(input: EstimateInput, context: ClaimContext): Promise<ClaimAnalysis> {

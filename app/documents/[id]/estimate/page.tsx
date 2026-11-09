@@ -1,21 +1,19 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { AiClaim } from "@/components/ai-claim";
+import { deepseekConfigured } from "@/lib/ai/deepseek";
+import type { ClaimRequest } from "@/lib/claim-request";
 import { getDb } from "@/lib/db";
 import {
-  buildPlan,
   computeEstimate,
   formatMoney,
   SCOPE_OPTIONS,
   toAmount,
   type ClauseRef,
-  type CoverageRowInput,
-  type EstimateRefs,
 } from "@/lib/estimate";
+import { loadEstimateContext } from "@/lib/estimate-context";
 
 export const dynamic = "force-dynamic";
-
-type PolicyRow = { id: number; data: string };
-type ExclusionRow = { id: number; text: string | null; page_from: number | null };
 
 function RefLink({ id, target }: { id: number; target: ClauseRef | null }) {
   if (!target) return null;
@@ -40,11 +38,8 @@ export default async function EstimatePage({
   const documentId = Number(id);
   if (!Number.isInteger(documentId) || documentId <= 0) notFound();
 
-  const db = getDb();
-  const document = db
-    .prepare("SELECT id, filename FROM document WHERE id = ?")
-    .get(documentId) as { id: number; filename: string } | undefined;
-  if (!document) notFound();
+  const context = loadEstimateContext(getDb(), documentId);
+  if (!context) notFound();
 
   const query = await searchParams;
   const field = (name: string): string => {
@@ -52,92 +47,19 @@ export default async function EstimatePage({
     return typeof value === "string" ? value : "";
   };
 
-  const policyRow = db
-    .prepare("SELECT id, data FROM policy WHERE document_id = ? ORDER BY id DESC LIMIT 1")
-    .get(documentId) as PolicyRow | undefined;
-
-  let benefitTable: { annual_limit?: number | null; waiting_days?: number | null } = {};
-  let policyWaitingDays: number | null = null;
-  if (policyRow) {
-    try {
-      const parsed = JSON.parse(policyRow.data) as {
-        waiting_days?: number | null;
-        benefit_table?: { annual_limit?: number | null; waiting_days?: number | null };
-      };
-      benefitTable = parsed.benefit_table ?? {};
-      policyWaitingDays = parsed.waiting_days ?? null;
-    } catch {
-      benefitTable = {};
-    }
-  }
-
-  const coverageRows: CoverageRowInput[] = policyRow
-    ? (
-        db
-          .prepare("SELECT name, data FROM coverage WHERE policy_id = ? ORDER BY id")
-          .all(policyRow.id) as unknown as { name: string | null; data: string }[]
-      ).map((row) => {
-        let parsed: { hospital_scope?: string | null; tiers?: { when: string; ratio: number }[] } = {};
-        try {
-          parsed = JSON.parse(row.data) as typeof parsed;
-        } catch {
-          parsed = {};
-        }
-        return {
-          name: row.name,
-          hospital_scope: parsed.hospital_scope ?? null,
-          tiers: parsed.tiers ?? [],
-        };
-      })
-    : [];
-
-  const benefitTableRow = db
-    .prepare("SELECT text FROM clause WHERE document_id = ? AND clause_no = ? ORDER BY seq LIMIT 1")
-    .get(documentId, "附表1") as { text: string } | undefined;
-
-  const plan = buildPlan({
-    coverage: coverageRows,
-    benefitTableText: benefitTableRow?.text ?? null,
-  });
-
-  const clauseRows = db
-    .prepare(
-      "SELECT clause_no, page_from FROM clause WHERE document_id = ? AND clause_no IN ('2.3','2.4','2.5','2.6','3.1','附表1')",
-    )
-    .all(documentId) as unknown as { clause_no: string; page_from: number }[];
-
-  const refOf = (clauseNo: string): ClauseRef | null => {
-    const row = clauseRows.find((item) => item.clause_no === clauseNo);
-    return row ? { clauseNo: row.clause_no, page: Number(row.page_from) } : null;
-  };
-
-  const refs: EstimateRefs = {
-    benefitTable: refOf("附表1"),
-    liability: refOf("2.5"),
-    limit: refOf("2.3"),
-    compensation: refOf("2.6"),
-    waiting: refOf("2.4"),
-    exclusion: refOf("3.1"),
-  };
-
-  const exclusions: ExclusionRow[] = policyRow
-    ? (db
-        .prepare(
-          "SELECT e.id, e.text, c.page_from FROM exclusion e LEFT JOIN clause c ON c.id = e.citation_clause_id WHERE e.policy_id = ? ORDER BY e.id",
-        )
-        .all(policyRow.id) as unknown as ExclusionRow[])
-    : [];
-
-  const annualLimit = benefitTable.annual_limit ?? null;
-  const waitingDays = benefitTable.waiting_days ?? policyWaitingDays;
-
   const submitted = query.cost !== undefined;
-  const benefit = plan.benefits.find((item) => item.key === field("benefit")) ?? plan.benefits[0] ?? null;
+  const benefit =
+    context.benefits.find((item) => item.key === field("benefit")) ?? context.benefits[0] ?? null;
   const scopeValue = field("scope") || benefit?.scopes[0] || "";
   const usedSocial = field("usedSocial") !== "no";
   const catalogText = field("catalog").trim();
   const exclusionValue = field("exclusion");
-  const exclusionText = exclusionValue === "" ? null : (exclusions[Number(exclusionValue)]?.text ?? null);
+  const exclusionIndex = exclusionValue === "" ? null : Number(exclusionValue);
+  const exclusionText =
+    exclusionIndex === null || !Number.isInteger(exclusionIndex)
+      ? null
+      : (context.exclusions[exclusionIndex]?.text ?? null);
+  const inWaiting = field("waiting") === "before";
 
   const result =
     submitted && benefit
@@ -150,14 +72,30 @@ export default async function EstimatePage({
             otherPaid: toAmount(field("other")),
             usedSocial,
             catalogCost: usedSocial || catalogText === "" ? null : toAmount(catalogText),
-            inWaiting: field("waiting") === "before",
+            inWaiting,
             exclusion: exclusionText,
             paidThisYear: toAmount(field("paid")),
-            annualLimit,
+            annualLimit: context.annualLimit,
           },
           benefit,
-          refs,
+          context.refs,
         )
+      : null;
+
+  const aiRequest: ClaimRequest | null =
+    result && benefit
+      ? {
+          benefit: benefit.key,
+          scope: scopeValue,
+          cost: toAmount(field("cost")),
+          social: toAmount(field("social")),
+          other: toAmount(field("other")),
+          usedSocial,
+          catalog: usedSocial || catalogText === "" ? null : toAmount(catalogText),
+          waiting: inWaiting,
+          exclusionIndex: exclusionIndex !== null && Number.isInteger(exclusionIndex) ? exclusionIndex : null,
+          paid: toAmount(field("paid")),
+        }
       : null;
 
   const fieldClass =
@@ -166,19 +104,19 @@ export default async function EstimatePage({
   return (
     <main className="mx-auto max-w-4xl px-6 py-10">
       <Link href={`/documents/${documentId}`} className="text-xs text-slate-500 hover:text-slate-900">
-        ← 返回 {document.filename}
+        ← 返回 {context.document.filename}
       </Link>
 
       <header className="mt-4 mb-6">
         <h1 className="text-lg font-semibold tracking-tight">按条款算一笔</h1>
         <p className="mt-1.5 text-xs text-slate-500">
-          填这次的实际花费和就诊情况，按条款逐段算预估可赔金额。只是按条款做算术，不构成理赔结论，最终以保险公司核定为准。
+          填这次的实际花费和就诊情况，按条款逐段算预估可赔金额，再让 AI 独立判一次，两个结果放在一起看。都只是参考，不构成理赔结论，最终以保险公司核定为准。
         </p>
       </header>
 
-      {plan.benefits.length === 0 ? (
+      {context.benefits.length === 0 ? (
         <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
-          {plan.notes[0] ?? "这份文档里没识别到可估算的保险责任。"}
+          {context.notes[0] ?? "这份文档里没识别到可估算的保险责任。"}
         </p>
       ) : (
         <>
@@ -187,7 +125,7 @@ export default async function EstimatePage({
               <label className="text-xs text-slate-600">
                 保险责任
                 <select name="benefit" defaultValue={benefit?.key} className={fieldClass}>
-                  {plan.benefits.map((item) => (
+                  {context.benefits.map((item) => (
                     <option key={item.key} value={item.key}>
                       {item.name}
                       {item.source === "builtin" ? "（内置规则）" : ""}
@@ -261,9 +199,9 @@ export default async function EstimatePage({
 
               <label className="text-xs text-slate-600">
                 费用发生时间
-                <select name="waiting" defaultValue={field("waiting") === "before" ? "before" : "after"} className={fieldClass}>
+                <select name="waiting" defaultValue={inWaiting ? "before" : "after"} className={fieldClass}>
                   <option value="after">
-                    等待期后{waitingDays === null ? "" : `（已过 ${waitingDays} 天）`}
+                    等待期后{context.waitingDays === null ? "" : `（已过 ${context.waitingDays} 天）`}
                   </option>
                   <option value="before">等待期内（含投保后 90 天内发病）</option>
                 </select>
@@ -273,9 +211,9 @@ export default async function EstimatePage({
                 是否命中责任免除
                 <select name="exclusion" defaultValue={exclusionValue} className={fieldClass}>
                   <option value="">没有命中任何免责情形</option>
-                  {exclusions.map((row, index) => (
+                  {context.exclusions.map((row, index) => (
                     <option key={row.id} value={String(index)}>
-                      {(row.text ?? "免责情形").split("：")[0]}
+                      {row.text.split("：")[0]}
                     </option>
                   ))}
                 </select>
@@ -300,9 +238,9 @@ export default async function EstimatePage({
                 算预估金额
               </button>
               <span className="text-xs text-slate-400">
-                {annualLimit === null
+                {context.annualLimit === null
                   ? "未识别每一保险期间的累计给付限额"
-                  : `每一保险期间累计给付限额 ${formatMoney(annualLimit)} 元`}
+                  : `每一保险期间累计给付限额 ${formatMoney(context.annualLimit)} 元`}
               </span>
             </div>
           </form>
@@ -310,7 +248,7 @@ export default async function EstimatePage({
           {result ? (
             <section className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h2 className="text-sm font-semibold text-slate-900">预估可赔</h2>
+                <h2 className="text-sm font-semibold text-slate-900">按条款计算</h2>
                 <span className="text-xs text-slate-400">
                   {benefit?.name} · {scopeValue}
                 </span>
@@ -345,7 +283,7 @@ export default async function EstimatePage({
                       {" = "}
                       <span className="font-medium text-slate-900">基数 {formatMoney(result.base)} 元</span>
                       <span className="ml-1">
-                        <RefLink id={documentId} target={refs.compensation} />
+                        依据 <RefLink id={documentId} target={context.refs.compensation} />
                       </span>
                     </p>
                   </div>
@@ -384,10 +322,10 @@ export default async function EstimatePage({
                   ) : null}
 
                   <p className="text-xs text-slate-500">
-                    比例依据 <RefLink id={documentId} target={refs.benefitTable} />
-                    {annualLimit === null ? null : (
+                    比例依据 <RefLink id={documentId} target={context.refs.benefitTable} />
+                    {context.annualLimit === null ? null : (
                       <>
-                        {" · "}限额依据 <RefLink id={documentId} target={refs.limit} />
+                        {" · "}限额依据 <RefLink id={documentId} target={context.refs.limit} />
                       </>
                     )}
                   </p>
@@ -408,9 +346,18 @@ export default async function EstimatePage({
             </section>
           ) : null}
 
-          {plan.notes.length > 0 ? (
+          {result && aiRequest ? (
+            <AiClaim
+              documentId={documentId}
+              request={aiRequest}
+              deterministicPayable={result.payable}
+              configured={deepseekConfigured()}
+            />
+          ) : null}
+
+          {context.notes.length > 0 ? (
             <ul className="mt-3 space-y-1 text-xs text-slate-500">
-              {plan.notes.map((note) => (
+              {context.notes.map((note) => (
                 <li key={note}>· {note}</li>
               ))}
             </ul>
