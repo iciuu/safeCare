@@ -1,0 +1,422 @@
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { getDb } from "@/lib/db";
+import {
+  buildPlan,
+  computeEstimate,
+  formatMoney,
+  SCOPE_OPTIONS,
+  toAmount,
+  type ClauseRef,
+  type CoverageRowInput,
+  type EstimateRefs,
+} from "@/lib/estimate";
+
+export const dynamic = "force-dynamic";
+
+type PolicyRow = { id: number; data: string };
+type ExclusionRow = { id: number; text: string | null; page_from: number | null };
+
+function RefLink({ id, target }: { id: number; target: ClauseRef | null }) {
+  if (!target) return null;
+  return (
+    <a
+      href={`/documents/${id}?p=${target.page}#doc`}
+      className="text-sky-700 underline decoration-dotted underline-offset-2"
+    >
+      {target.clauseNo} · P{target.page}
+    </a>
+  );
+}
+
+export default async function EstimatePage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const { id } = await params;
+  const documentId = Number(id);
+  if (!Number.isInteger(documentId) || documentId <= 0) notFound();
+
+  const db = getDb();
+  const document = db
+    .prepare("SELECT id, filename FROM document WHERE id = ?")
+    .get(documentId) as { id: number; filename: string } | undefined;
+  if (!document) notFound();
+
+  const query = await searchParams;
+  const field = (name: string): string => {
+    const value = query[name];
+    return typeof value === "string" ? value : "";
+  };
+
+  const policyRow = db
+    .prepare("SELECT id, data FROM policy WHERE document_id = ? ORDER BY id DESC LIMIT 1")
+    .get(documentId) as PolicyRow | undefined;
+
+  let benefitTable: { annual_limit?: number | null; waiting_days?: number | null } = {};
+  let policyWaitingDays: number | null = null;
+  if (policyRow) {
+    try {
+      const parsed = JSON.parse(policyRow.data) as {
+        waiting_days?: number | null;
+        benefit_table?: { annual_limit?: number | null; waiting_days?: number | null };
+      };
+      benefitTable = parsed.benefit_table ?? {};
+      policyWaitingDays = parsed.waiting_days ?? null;
+    } catch {
+      benefitTable = {};
+    }
+  }
+
+  const coverageRows: CoverageRowInput[] = policyRow
+    ? (
+        db
+          .prepare("SELECT name, data FROM coverage WHERE policy_id = ? ORDER BY id")
+          .all(policyRow.id) as unknown as { name: string | null; data: string }[]
+      ).map((row) => {
+        let parsed: { hospital_scope?: string | null; tiers?: { when: string; ratio: number }[] } = {};
+        try {
+          parsed = JSON.parse(row.data) as typeof parsed;
+        } catch {
+          parsed = {};
+        }
+        return {
+          name: row.name,
+          hospital_scope: parsed.hospital_scope ?? null,
+          tiers: parsed.tiers ?? [],
+        };
+      })
+    : [];
+
+  const benefitTableRow = db
+    .prepare("SELECT text FROM clause WHERE document_id = ? AND clause_no = ? ORDER BY seq LIMIT 1")
+    .get(documentId, "附表1") as { text: string } | undefined;
+
+  const plan = buildPlan({
+    coverage: coverageRows,
+    benefitTableText: benefitTableRow?.text ?? null,
+  });
+
+  const clauseRows = db
+    .prepare(
+      "SELECT clause_no, page_from FROM clause WHERE document_id = ? AND clause_no IN ('2.3','2.4','2.5','2.6','3.1','附表1')",
+    )
+    .all(documentId) as unknown as { clause_no: string; page_from: number }[];
+
+  const refOf = (clauseNo: string): ClauseRef | null => {
+    const row = clauseRows.find((item) => item.clause_no === clauseNo);
+    return row ? { clauseNo: row.clause_no, page: Number(row.page_from) } : null;
+  };
+
+  const refs: EstimateRefs = {
+    benefitTable: refOf("附表1"),
+    liability: refOf("2.5"),
+    limit: refOf("2.3"),
+    compensation: refOf("2.6"),
+    waiting: refOf("2.4"),
+    exclusion: refOf("3.1"),
+  };
+
+  const exclusions: ExclusionRow[] = policyRow
+    ? (db
+        .prepare(
+          "SELECT e.id, e.text, c.page_from FROM exclusion e LEFT JOIN clause c ON c.id = e.citation_clause_id WHERE e.policy_id = ? ORDER BY e.id",
+        )
+        .all(policyRow.id) as unknown as ExclusionRow[])
+    : [];
+
+  const annualLimit = benefitTable.annual_limit ?? null;
+  const waitingDays = benefitTable.waiting_days ?? policyWaitingDays;
+
+  const submitted = query.cost !== undefined;
+  const benefit = plan.benefits.find((item) => item.key === field("benefit")) ?? plan.benefits[0] ?? null;
+  const scopeValue = field("scope") || benefit?.scopes[0] || "";
+  const usedSocial = field("usedSocial") !== "no";
+  const catalogText = field("catalog").trim();
+  const exclusionValue = field("exclusion");
+  const exclusionText = exclusionValue === "" ? null : (exclusions[Number(exclusionValue)]?.text ?? null);
+
+  const result =
+    submitted && benefit
+      ? computeEstimate(
+          {
+            benefitKey: benefit.key,
+            scope: scopeValue,
+            totalCost: toAmount(field("cost")),
+            socialPaid: toAmount(field("social")),
+            otherPaid: toAmount(field("other")),
+            usedSocial,
+            catalogCost: usedSocial || catalogText === "" ? null : toAmount(catalogText),
+            inWaiting: field("waiting") === "before",
+            exclusion: exclusionText,
+            paidThisYear: toAmount(field("paid")),
+            annualLimit,
+          },
+          benefit,
+          refs,
+        )
+      : null;
+
+  const fieldClass =
+    "mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-900 outline-none focus:border-sky-500";
+
+  return (
+    <main className="mx-auto max-w-4xl px-6 py-10">
+      <Link href={`/documents/${documentId}`} className="text-xs text-slate-500 hover:text-slate-900">
+        ← 返回 {document.filename}
+      </Link>
+
+      <header className="mt-4 mb-6">
+        <h1 className="text-lg font-semibold tracking-tight">按条款算一笔</h1>
+        <p className="mt-1.5 text-xs text-slate-500">
+          填这次的实际花费和就诊情况，按条款逐段算预估可赔金额。只是按条款做算术，不构成理赔结论，最终以保险公司核定为准。
+        </p>
+      </header>
+
+      {plan.benefits.length === 0 ? (
+        <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+          {plan.notes[0] ?? "这份文档里没识别到可估算的保险责任。"}
+        </p>
+      ) : (
+        <>
+          <form method="get" className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-xs text-slate-600">
+                保险责任
+                <select name="benefit" defaultValue={benefit?.key} className={fieldClass}>
+                  {plan.benefits.map((item) => (
+                    <option key={item.key} value={item.key}>
+                      {item.name}
+                      {item.source === "builtin" ? "（内置规则）" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="text-xs text-slate-600">
+                就诊范围
+                <select name="scope" defaultValue={scopeValue} className={fieldClass}>
+                  {SCOPE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="text-xs text-slate-600">
+                责任范围内医疗费用（元）
+                <input
+                  name="cost"
+                  defaultValue={field("cost")}
+                  inputMode="decimal"
+                  placeholder="例如 32000"
+                  className={fieldClass}
+                />
+              </label>
+
+              <label className="text-xs text-slate-600">
+                社保 / 公费 / 补充医疗已报（元）
+                <input
+                  name="social"
+                  defaultValue={field("social")}
+                  inputMode="decimal"
+                  placeholder="例如 12000"
+                  className={fieldClass}
+                />
+              </label>
+
+              <label className="text-xs text-slate-600">
+                其他途径已赔（单位、其他商业保险，元）
+                <input
+                  name="other"
+                  defaultValue={field("other")}
+                  inputMode="decimal"
+                  placeholder="没有就留空"
+                  className={fieldClass}
+                />
+              </label>
+
+              <label className="text-xs text-slate-600">
+                是否以社保身份就诊
+                <select name="usedSocial" defaultValue={usedSocial ? "yes" : "no"} className={fieldClass}>
+                  <option value="yes">是，走了社保结算</option>
+                  <option value="no">否，没用社保</option>
+                </select>
+              </label>
+
+              <label className="text-xs text-slate-600">
+                其中医保目录内费用（元）
+                <input
+                  name="catalog"
+                  defaultValue={field("catalog")}
+                  inputMode="decimal"
+                  placeholder="没用社保时填，留空按全额目录内算"
+                  className={fieldClass}
+                />
+              </label>
+
+              <label className="text-xs text-slate-600">
+                费用发生时间
+                <select name="waiting" defaultValue={field("waiting") === "before" ? "before" : "after"} className={fieldClass}>
+                  <option value="after">
+                    等待期后{waitingDays === null ? "" : `（已过 ${waitingDays} 天）`}
+                  </option>
+                  <option value="before">等待期内（含投保后 90 天内发病）</option>
+                </select>
+              </label>
+
+              <label className="text-xs text-slate-600 sm:col-span-2">
+                是否命中责任免除
+                <select name="exclusion" defaultValue={exclusionValue} className={fieldClass}>
+                  <option value="">没有命中任何免责情形</option>
+                  {exclusions.map((row, index) => (
+                    <option key={row.id} value={String(index)}>
+                      {(row.text ?? "免责情形").split("：")[0]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="text-xs text-slate-600">
+                本保险期间已累计赔付（元）
+                <input
+                  name="paid"
+                  defaultValue={field("paid") || "0"}
+                  inputMode="decimal"
+                  className={fieldClass}
+                />
+              </label>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button
+                type="submit"
+                className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800"
+              >
+                算预估金额
+              </button>
+              <span className="text-xs text-slate-400">
+                {annualLimit === null
+                  ? "未识别每一保险期间的累计给付限额"
+                  : `每一保险期间累计给付限额 ${formatMoney(annualLimit)} 元`}
+              </span>
+            </div>
+          </form>
+
+          {result ? (
+            <section className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="text-sm font-semibold text-slate-900">预估可赔</h2>
+                <span className="text-xs text-slate-400">
+                  {benefit?.name} · {scopeValue}
+                </span>
+              </div>
+
+              <p className="mt-2 text-3xl font-semibold tabular-nums tracking-tight text-slate-900">
+                ¥ {formatMoney(result.payable)}
+              </p>
+
+              {result.blockers.length > 0 ? (
+                <ul className="mt-3 space-y-2">
+                  {result.blockers.map((blocker) => (
+                    <li
+                      key={blocker.title}
+                      className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800"
+                    >
+                      <span className="font-medium">{blocker.title}</span>
+                      <span className="ml-1">{blocker.detail}</span>
+                      <span className="ml-1">
+                        <RefLink id={documentId} target={blocker.ref} />
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="mt-3 space-y-3">
+                  <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                    <p>
+                      责任范围内费用 {formatMoney(toAmount(field("cost")))} 元
+                      {toAmount(field("social")) > 0 ? ` − 社保已报 ${formatMoney(toAmount(field("social")))} 元` : ""}
+                      {toAmount(field("other")) > 0 ? ` − 其他途径 ${formatMoney(toAmount(field("other")))} 元` : ""}
+                      {" = "}
+                      <span className="font-medium text-slate-900">基数 {formatMoney(result.base)} 元</span>
+                      <span className="ml-1">
+                        <RefLink id={documentId} target={refs.compensation} />
+                      </span>
+                    </p>
+                  </div>
+
+                  {result.parts.length > 0 ? (
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-left text-slate-400">
+                          <th className="pb-1 font-normal">分段</th>
+                          <th className="pb-1 text-right font-normal">金额</th>
+                          <th className="pb-1 text-right font-normal">比例</th>
+                          <th className="pb-1 text-right font-normal">给付</th>
+                        </tr>
+                      </thead>
+                      <tbody className="tabular-nums">
+                        {result.parts.map((part, index) => (
+                          <tr key={`${part.label}-${index}`} className="border-t border-slate-100">
+                            <td className="py-1 text-slate-700">{part.label}</td>
+                            <td className="py-1 text-right text-slate-700">{formatMoney(part.portion)}</td>
+                            <td className="py-1 text-right text-slate-700">
+                              {Math.round(part.ratio * 100)}%
+                            </td>
+                            <td className="py-1 text-right text-slate-900">{formatMoney(part.amount)}</td>
+                          </tr>
+                        ))}
+                        <tr className="border-t border-slate-200">
+                          <td className="py-1 text-slate-500" colSpan={3}>
+                            按比例合计
+                          </td>
+                          <td className="py-1 text-right font-medium text-slate-900">
+                            {formatMoney(result.gross)}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  ) : null}
+
+                  <p className="text-xs text-slate-500">
+                    比例依据 <RefLink id={documentId} target={refs.benefitTable} />
+                    {annualLimit === null ? null : (
+                      <>
+                        {" · "}限额依据 <RefLink id={documentId} target={refs.limit} />
+                      </>
+                    )}
+                  </p>
+                </div>
+              )}
+
+              {result.notes.length > 0 ? (
+                <ul className="mt-3 space-y-1 text-xs text-amber-700">
+                  {result.notes.map((note) => (
+                    <li key={note}>· {note}</li>
+                  ))}
+                </ul>
+              ) : null}
+
+              <p className="mt-3 border-t border-slate-100 pt-2 text-xs text-slate-400">
+                只按条款文字算，没考虑医院等级、合理且必要性的核定和单项限额（如住院耐用医疗设备 2 万元）；实际赔付以保险公司核定为准。
+              </p>
+            </section>
+          ) : null}
+
+          {plan.notes.length > 0 ? (
+            <ul className="mt-3 space-y-1 text-xs text-slate-500">
+              {plan.notes.map((note) => (
+                <li key={note}>· {note}</li>
+              ))}
+            </ul>
+          ) : null}
+        </>
+      )}
+    </main>
+  );
+}

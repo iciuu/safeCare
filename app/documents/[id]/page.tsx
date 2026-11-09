@@ -1,0 +1,577 @@
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { DocumentViewer } from "@/components/document-viewer";
+import { getDb } from "@/lib/db";
+import type { PolicyMeta } from "@/lib/policy-meta";
+
+export const dynamic = "force-dynamic";
+
+type DocumentRow = {
+  id: number;
+  filename: string;
+  page_count: number;
+  char_count: number;
+  byte_size: number;
+  has_text_layer: number;
+  clause_count: number;
+  clause_coverage: number;
+  toc_expected: number;
+  toc_matched: number;
+  created_at: string;
+};
+
+type BenefitView = {
+  id: number;
+  name: string;
+  hospital_scope: string | null;
+  tiers: { when: string; ratio: number }[];
+};
+
+type StoredPolicy = PolicyMeta & {
+  benefit_table?: {
+    annual_limit: number | null;
+    renewal_limit: number | null;
+    waiting_days: number | null;
+    waiting_exceptions: string | null;
+  };
+};
+
+type AiFactView = {
+  type: string;
+  label: string;
+  value: string;
+  unit: string;
+  condition: string;
+  quote: string;
+};
+
+type AiRow = {
+  clause_id: number;
+  clause_no: string | null;
+  page_from: number;
+  kind: string | null;
+  summary: string | null;
+  data: string;
+  review_status: string;
+};
+
+type ClauseRow = {
+  id: number;
+  clause_no: string;
+  heading_path: string;
+  category: string;
+  page_from: number;
+  page_to: number;
+};
+
+const POLICY_LABEL: Record<string, string> = {
+  medical: "医疗险",
+  critical_illness: "重疾险",
+  accident: "意外险",
+  life: "寿险",
+  unknown: "未识别",
+};
+
+const AI_KIND_LABEL: Record<string, string> = {
+  coverage: "保险责任",
+  exclusion: "责任免除",
+  limit: "金额/限额",
+  waiting_period: "等待期",
+  renewal: "续保",
+  definition: "定义",
+  premium: "保险费",
+  termination: "解除/退保",
+  claims: "理赔",
+  other: "其他",
+};
+
+const CATEGORY_LABEL: Record<string, string> = {
+  coverage: "保险责任",
+  exclusion: "责任免除",
+  waiting_period: "等待期",
+  limit: "金额/限额",
+  renewal: "续保",
+  definition: "定义",
+  premium: "保险费",
+  termination: "解除/退保",
+  claims: "理赔",
+  other: "其他",
+};
+
+type QuickItem = {
+  label: string;
+  value: string;
+  unit: string;
+  condition: string;
+  quote: string;
+  page: number;
+};
+
+function QuickColumn({
+  id,
+  title,
+  hint,
+  items,
+  empty,
+}: {
+  id: number;
+  title: string;
+  hint: string;
+  items: QuickItem[];
+  empty: string;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-3">
+      <p className="text-xs font-medium text-slate-800">{title}</p>
+      <p className="mt-0.5 text-xs text-slate-400">{hint}</p>
+      {items.length === 0 ? (
+        <p className="mt-2 text-xs text-slate-400">{empty}</p>
+      ) : (
+        <ul className="mt-2 space-y-1.5">
+          {items.map((item, index) => (
+            <li key={`${item.label}-${index}`} className="text-xs leading-5 text-slate-700">
+              <span>{item.label}</span>{" "}
+              <span className="font-medium text-slate-900">
+                {item.value}
+                {item.unit ? ` ${item.unit}` : ""}
+              </span>
+              {item.condition ? <span className="ml-1 text-slate-500">{item.condition}</span> : null}
+              <a
+                href={`/documents/${id}?p=${item.page}&q=${encodeURIComponent(item.quote.slice(0, 60))}#doc`}
+                className="ml-1 text-sky-700 underline decoration-dotted underline-offset-2"
+              >
+                P{item.page}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export default async function DocumentPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ p?: string; q?: string }>;
+}) {
+  const { id } = await params;
+  const { p: pageParam, q: quoteParam } = await searchParams;
+  const focusPage = Number(pageParam);
+  const documentId = Number(id);
+  if (!Number.isInteger(documentId) || documentId <= 0) notFound();
+
+  const db = getDb();
+  const document = db
+    .prepare(
+      "SELECT id, filename, page_count, char_count, byte_size, has_text_layer, clause_count, clause_coverage, toc_expected, toc_matched, created_at FROM document WHERE id = ?",
+    )
+    .get(documentId) as unknown as DocumentRow | undefined;
+
+  if (!document) notFound();
+
+  // node:sqlite 返回的是 null 原型对象，传给客户端组件会被拒，这里映射成普通对象
+  const pages = (
+    db
+      .prepare("SELECT page_no, char_count FROM page WHERE document_id = ? ORDER BY page_no")
+      .all(documentId) as unknown as { page_no: number; char_count: number }[]
+  ).map((row) => ({ page_no: Number(row.page_no), char_count: Number(row.char_count) }));
+
+  const clauses = (
+    db
+      .prepare(
+        "SELECT id, clause_no, heading_path, category, page_from, page_to FROM clause WHERE document_id = ? ORDER BY seq",
+      )
+      .all(documentId) as unknown as ClauseRow[]
+  ).map((row) => ({ ...row }));
+
+  const policyRow = db
+    .prepare("SELECT id, data FROM policy WHERE document_id = ? ORDER BY id DESC LIMIT 1")
+    .get(documentId) as { id: number; data: string } | undefined;
+
+  let policy: StoredPolicy | null = null;
+  if (policyRow) {
+    try {
+      policy = JSON.parse(policyRow.data) as StoredPolicy;
+    } catch {
+      policy = null;
+    }
+  }
+
+  const benefits: BenefitView[] = policyRow
+    ? (
+        db
+          .prepare("SELECT id, name, data FROM coverage WHERE policy_id = ? ORDER BY id")
+          .all(policyRow.id) as unknown as { id: number; name: string | null; data: string }[]
+      ).map((row) => {
+        let parsed: { hospital_scope?: string | null; tiers?: { when: string; ratio: number }[] } = {};
+        try {
+          parsed = JSON.parse(row.data) as typeof parsed;
+        } catch {
+          parsed = {};
+        }
+        return {
+          id: row.id,
+          name: row.name ?? "未命名责任",
+          hospital_scope: parsed.hospital_scope ?? null,
+          tiers: parsed.tiers ?? [],
+        };
+      })
+    : [];
+
+  const aiRows = (
+    db
+      .prepare(
+        "SELECT c.id AS clause_id, c.clause_no, c.page_from, a.kind, a.summary, a.data, a.review_status FROM clause_ai a JOIN clause c ON c.id = a.clause_id WHERE c.document_id = ? ORDER BY c.seq",
+      )
+      .all(documentId) as unknown as AiRow[]
+  ).map((row) => {
+    let facts: AiFactView[] = [];
+    try {
+      const parsed = JSON.parse(row.data) as { facts?: AiFactView[] };
+      facts = Array.isArray(parsed.facts) ? parsed.facts : [];
+    } catch {
+      facts = [];
+    }
+    return { ...row, facts };
+  });
+
+  // AI 判定优先，本地分类只在模型没给结果时兜底
+  const aiKindById = new Map(aiRows.map((row) => [row.clause_id, row.kind]));
+
+  const flatFacts = aiRows.flatMap((row) =>
+    row.facts.map((fact) => ({
+      ...fact,
+      page: row.page_from,
+      kind: row.kind ?? "other",
+    })),
+  );
+
+  const exclusionFacts: QuickItem[] = flatFacts
+    .filter((fact) => fact.kind === "exclusion")
+    .map((fact) => ({
+      label: fact.label || "免责情形",
+      value: fact.value,
+      unit: fact.unit,
+      condition: fact.condition,
+      quote: fact.quote,
+      page: fact.page,
+    }));
+
+  const amountFacts: QuickItem[] = flatFacts
+    .filter((fact) => fact.kind !== "exclusion" && ["limit", "ratio", "deductible"].includes(fact.type))
+    .map((fact) => ({
+      label: fact.label || "金额",
+      value: fact.value,
+      unit: fact.unit,
+      condition: fact.condition,
+      quote: fact.quote,
+      page: fact.page,
+    }));
+
+  const conditionFacts: QuickItem[] = flatFacts
+    .filter(
+      (fact) =>
+        fact.kind !== "exclusion" && ["waiting_period", "period", "scope"].includes(fact.type),
+    )
+    .map((fact) => ({
+      label: fact.label || "条件",
+      value: fact.value,
+      unit: fact.unit,
+      condition: fact.condition,
+      quote: fact.quote,
+      page: fact.page,
+    }));
+
+  const pending = aiRows.filter((row) => row.review_status !== "ok" || row.facts.length === 0);
+  const aiConfigured = Boolean(process.env.DEEPSEEK_API_KEY);
+
+  const policyFacts: { label: string; value: string | null }[] = policy
+    ? [
+        { label: "保险公司", value: policy.insurer },
+        { label: "产品", value: policy.product_name },
+        { label: "保单号", value: policy.policy_no },
+        { label: "被保险人", value: policy.insured_name },
+        {
+          label: "保险期间",
+          value:
+            policy.effective_from && policy.effective_to
+              ? `${policy.effective_from} → ${policy.effective_to}`
+              : (policy.effective_from ?? policy.effective_to),
+        },
+        {
+          label: "保险费",
+          value: policy.premium === null ? null : `${policy.premium.toLocaleString("zh-CN")} 元`,
+        },
+        { label: "等待期", value: policy.waiting_days === null ? null : `${policy.waiting_days} 日` },
+        {
+          label: "犹豫期",
+          value: policy.hesitation_days === null ? null : `${policy.hesitation_days} 日`,
+        },
+        { label: "险种", value: POLICY_LABEL[policy.category] ?? policy.category },
+      ]
+    : [];
+
+  return (
+    <main className="mx-auto max-w-6xl px-6 py-10">
+      <Link href="/" className="text-xs text-slate-500 hover:text-slate-900">
+        ← 返回文档列表
+      </Link>
+
+      <header className="mt-4 mb-6">
+        <h1 className="truncate text-lg font-semibold tracking-tight">{document.filename}</h1>
+        <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+          <span>{document.page_count} 页</span>
+          <span>{document.char_count.toLocaleString("zh-CN")} 字</span>
+          <span>上传于 {document.created_at}</span>
+          {document.has_text_layer ? null : (
+            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-amber-700">未检测到文本层</span>
+          )}
+        </p>
+      </header>
+
+      {policy ? (
+        <section className="mb-8 rounded-xl border border-slate-200 bg-white p-4">
+          <dl className="grid gap-x-8 gap-y-3 text-xs sm:grid-cols-2 lg:grid-cols-3">
+            {policyFacts.map((fact) => (
+              <div key={fact.label}>
+                <dt className="text-slate-400">{fact.label}</dt>
+                <dd className={`mt-0.5 truncate ${fact.value ? "text-slate-800" : "text-amber-600"}`}>
+                  {fact.value ?? "未识别"}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      ) : null}
+
+      <section className="mb-8 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-medium text-sky-900">按你的实际情况算一笔</p>
+            <p className="mt-0.5 text-xs text-sky-700">
+              填费用、社保已报金额、就诊范围，按条款逐段算出预估可赔金额，每步都能点回原文。
+            </p>
+          </div>
+          <Link
+            href={`/documents/${documentId}/estimate`}
+            className="shrink-0 rounded-md bg-sky-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-800"
+          >
+            估算能赔多少 →
+          </Link>
+        </div>
+      </section>
+
+      {flatFacts.length > 0 ? (
+        <section className="mb-8">
+          <div className="mb-2 flex items-baseline justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-900">速查卡</h2>
+            <p className="text-xs text-slate-500">点 P 页码跳到原文那一页并高亮引文</p>
+          </div>
+          <div className="grid gap-2 md:grid-cols-3">
+            <QuickColumn
+              id={documentId}
+              title={`报不报 · 免责 ${exclusionFacts.length} 项`}
+              hint="以下情形不承担给付责任"
+              items={exclusionFacts.slice(0, 6)}
+              empty="还没抽到免责情形"
+            />
+            <QuickColumn
+              id={documentId}
+              title={`报多少 · ${amountFacts.length} 项`}
+              hint="限额、比例、免赔额"
+              items={amountFacts.slice(0, 6)}
+              empty="还没抽到金额类字段"
+            />
+            <QuickColumn
+              id={documentId}
+              title={`还得满足什么 · ${conditionFacts.length} 项`}
+              hint="等待期、就诊范围、期间要求"
+              items={conditionFacts.slice(0, 6)}
+              empty="还没抽到条件类字段"
+            />
+          </div>
+        </section>
+      ) : null}
+
+      {aiRows.length > 0 ? (
+        <section className="mb-8">
+          <div className="mb-2 flex items-baseline justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-900">保障要点（AI 抽取）</h2>
+            <p className="text-xs text-slate-500">以此为准 · 每条要点都能反查回原文</p>
+          </div>
+          <div className="space-y-2">
+            {aiRows.map((row) => (
+              <div
+                key={`${row.clause_no}-${row.page_from}`}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-3"
+              >
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <p className="text-xs font-medium text-slate-800">
+                    <span className="tabular-nums text-slate-500">{row.clause_no}</span>{" "}
+                    {row.summary || AI_KIND_LABEL[row.kind ?? "other"] || "条款"}
+                  </p>
+                  <span className="shrink-0 text-xs text-slate-400">
+                    P{row.page_from}
+                    {row.review_status === "needs_review" ? " · 待复核" : ""}
+                  </span>
+                </div>
+                {row.facts.length > 0 ? (
+                  <ul className="mt-2 space-y-1.5">
+                    {row.facts.map((fact, index) => (
+                      <li key={`${fact.label}-${index}`} className="text-xs">
+                        <span className="text-slate-400">{fact.label}</span>{" "}
+                        <span className="font-medium text-slate-800">
+                          {fact.value}
+                          {fact.unit ? ` ${fact.unit}` : ""}
+                        </span>
+                        {fact.condition ? (
+                          <span className="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">
+                            {fact.condition}
+                          </span>
+                        ) : null}
+                        {fact.quote ? (
+                          <p className="mt-0.5 line-clamp-2 text-slate-500">「{fact.quote}」</p>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-1.5 text-xs text-amber-600">这条没抽出可校验的要点</p>
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-slate-400">
+            本次只上传了条款编号、标题与已脱敏的条款正文；姓名、证件号、电话、保单号、地址留在本机。
+          </p>
+        </section>
+      ) : aiConfigured ? (
+        <p className="mb-8 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+          AI 增补没有跑成功，本地规则结果不受影响。
+        </p>
+      ) : (
+        <p className="mb-8 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-500">
+          未配置 DEEPSEEK_API_KEY，当前只用本地规则抽取。
+        </p>
+      )}
+
+      {benefits.length > 0 || policy?.benefit_table?.annual_limit ? (
+        <section className="mb-8">
+          <div className="mb-2 flex items-baseline justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-900">保障表（本地规则补充）</h2>
+            <p className="text-right text-xs text-slate-500">
+              {policy?.benefit_table?.annual_limit
+                ? `年度限额 ${(policy.benefit_table.annual_limit / 10000).toLocaleString("zh-CN")} 万元`
+                : ""}
+              {policy?.benefit_table?.renewal_limit
+                ? ` · 保证续保期内 ${(policy.benefit_table.renewal_limit / 10000).toLocaleString("zh-CN")} 万元`
+                : ""}
+            </p>
+          </div>
+          <p className="mb-2 text-xs text-slate-400">AI 没覆盖到的范围才看这里；数字与条件以条款原文为准。</p>
+          <div className="space-y-2">
+            {benefits.length === 0 ? (
+              <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+                附表里没切出责任条目，先看上面的给付限额。
+              </p>
+            ) : null}
+            {benefits.map((item) => (
+              <div key={item.id} className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+                <div className="flex items-baseline justify-between gap-3">
+                  <p className="text-xs font-medium text-slate-800">{item.name}</p>
+                  <p className="shrink-0 text-xs text-slate-500">
+                    {item.hospital_scope ?? "范围未识别"}
+                  </p>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {item.tiers.length === 0 ? (
+                    <span className="rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-700">
+                      未识别给付比例
+                    </span>
+                  ) : (
+                    item.tiers.map((tier, index) => (
+                      <span
+                        key={`${tier.when}-${index}`}
+                        className="rounded bg-emerald-50 px-2 py-0.5 text-xs text-emerald-800"
+                      >
+                        {tier.when} {Math.round(tier.ratio * 100)}%
+                      </span>
+                    ))
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {pending.length > 0 ? (
+        <section className="mb-8 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+          <h2 className="text-sm font-semibold text-amber-800">待复核 · {pending.length} 条</h2>
+          <p className="mt-0.5 text-xs text-amber-700">
+            这些条款没抽出可校验的要点（多为章节引言或纯表格），不会被拿来下结论。
+          </p>
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {pending.map((row) => (
+              <li key={row.clause_id} className="rounded bg-white/70 px-2 py-0.5 text-xs text-amber-900">
+                {row.clause_no} · P{row.page_from}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {clauses.length > 0 ? (
+        <section className="mb-8">
+          <div className="mb-2 flex items-baseline justify-between">
+            <h2 className="text-sm font-semibold text-slate-900">条款结构</h2>
+            <p className="text-xs text-slate-500">
+              {document.clause_count} 条 · 覆盖 {Math.round(document.clause_coverage * 100)}%
+              {document.toc_expected > 0
+                ? ` · 目录 ${document.toc_matched}/${document.toc_expected}`
+                : ""}
+            </p>
+          </div>
+          <ul className="max-h-72 divide-y divide-slate-100 overflow-y-auto rounded-xl border border-slate-200 bg-white">
+            {clauses.map((clause) => {
+              const aiKind = aiKindById.get(clause.id);
+              const category = aiKind ?? clause.category;
+              return (
+                <li key={clause.id} className="flex items-center gap-3 px-4 py-2 text-xs">
+                  <span className="w-14 shrink-0 tabular-nums text-slate-500">{clause.clause_no}</span>
+                  <span className="min-w-0 flex-1 truncate text-slate-800">
+                    {clause.heading_path.split(" > ").pop()}
+                  </span>
+                  <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">
+                    {CATEGORY_LABEL[category] ?? category}
+                  </span>
+                  {aiKind ? (
+                    <span className="shrink-0 rounded bg-sky-50 px-1 py-0.5 text-sky-700">AI</span>
+                  ) : null}
+                  <span className="w-14 shrink-0 text-right text-slate-400">
+                    P{clause.page_from}
+                    {clause.page_to !== clause.page_from ? `-${clause.page_to}` : ""}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
+
+      <div id="doc">
+        <DocumentViewer
+          id={document.id}
+          filename={document.filename}
+          pageCount={document.page_count}
+          pages={pages}
+          focusPage={Number.isInteger(focusPage) && focusPage > 0 ? focusPage : undefined}
+          highlight={quoteParam}
+        />
+      </div>
+    </main>
+  );
+}

@@ -1,0 +1,16 @@
+node_modules/
+.next/
+out/
+build/
+next-env.d.ts
+
+# 本地数据：保单原件、SQLite 库、脱敏映射表，绝不入库
+data/
+
+.env
+.env.local
+.env*.local
+
+*.log
+.DS_Store
+Thumbs.db

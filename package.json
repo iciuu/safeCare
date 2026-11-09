@@ -1,0 +1,33 @@
+{
+  "name": "safecare",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/segmentation.test.ts tests/policy-meta.test.ts tests/toc.test.ts tests/benefit-table.test.ts tests/redact.test.ts tests/enrich.test.ts tests/estimate.test.ts",
+    "sample": "node scripts/make-sample.mjs"
+  },
+  "dependencies": {
+    "next": "^15.1.6",
+    "pdfjs-dist": "3.11.174",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.4.20",
+    "pdf-lib": "^1.17.1",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}
