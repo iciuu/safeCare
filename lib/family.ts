@@ -65,10 +65,13 @@ export function isSharedPolicy(policy: { insuredName: string | null }): boolean 
 export type HouseholdMember = {
   name: string;
   policies: ManagedPolicy[];
+  /** 这个人的全部保单保费（含共同被保那份，它也是这个人名下的保障） */
   premium: number;
   needsReview: number;
-  /** 与他人共有的保单份数（保费不计入上面的 premium） */
+  /** 与他人共有的保单份数 */
   shared: number;
+  /** 上面 premium 里属于共同被保保单的部分，界面上单独标明它两边都列 */
+  sharedPremium: number;
   /** 最近一个到期日（不含已过期），用来排先后 */
   nextExpiry: number | null;
 };
@@ -87,14 +90,15 @@ export function groupByInsured(policies: ManagedPolicy[]): HouseholdMember[] {
       const days = list
         .map((policy) => daysUntil(policy.effectiveTo))
         .filter((value): value is number => value !== null && value >= 0);
-      const own = list.filter((policy) => !isSharedPolicy(policy));
+      const shared = list.filter((policy) => isSharedPolicy(policy));
+      const premiumOf = (items: ManagedPolicy[]) => items.reduce((sum, policy) => sum + (policy.premium ?? 0), 0);
       return {
         name,
         policies: list,
-        // 共享保单的保费只在共享人之间算一次，不重复计入每个人的合计
-        premium: own.reduce((sum, policy) => sum + (policy.premium ?? 0), 0),
+        premium: premiumOf(list),
         needsReview: list.reduce((sum, policy) => sum + policy.needsReview, 0),
-        shared: list.length - own.length,
+        shared: shared.length,
+        sharedPremium: premiumOf(shared),
         nextExpiry: days.length > 0 ? Math.min(...days) : null,
       };
     })

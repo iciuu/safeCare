@@ -161,7 +161,7 @@ test("日期校验：只认 YYYY-MM-DD 且真实的日期", () => {
   assert.equal(isIsoDate(""), false);
 });
 
-test("多个被保险人：一张夫妻互保保单在两个人名下都出现，保费只算一次", () => {
+test("多个被保险人：一张夫妻互保保单在两个人名下都出现，保费各自含共同部分", () => {
   const shared = policy({ documentId: 28, insuredName: "牛广、严梦婷", premium: 1630, effectiveTo: "2051-08-31" });
   const own = policy({ documentId: 27, insuredName: "牛广", premium: 5000, effectiveTo: "2060-01-01" });
 
@@ -171,10 +171,13 @@ test("多个被保险人：一张夫妻互保保单在两个人名下都出现�
 
   assert.deepEqual(members.map((member) => member.name).sort(), ["严梦婷", "牛广"]);
   assert.equal(niu?.policies.length, 2);
-  assert.equal(niu?.premium, 5000);
+  // 共同被保的 1,630 在两个人名下都列，但页头总数只算一份
+  assert.equal(niu?.premium, 6630);
+  assert.equal(niu?.sharedPremium, 1630);
   assert.equal(niu?.shared, 1);
   assert.equal(yan?.policies.length, 1);
-  assert.equal(yan?.premium, 0);
+  assert.equal(yan?.premium, 1630);
+  assert.equal(yan?.sharedPremium, 1630);
   assert.equal(yan?.shared, 1);
 });
 

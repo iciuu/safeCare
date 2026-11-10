@@ -147,8 +147,8 @@ export function extractPolicyMeta(pages: PageText[]): PolicyMeta {
     findNumber(lines, /生效之日起\s*(\d{1,3})\s*日内被保险人发生疾病/);
 
   return {
-    // 条款正文里写的是「“我们”、“本公司”均指中国人民人寿保险股份有限公司」，前缀要剔掉
-    insurer: insurer?.value.replace(/^(均指|指)/, "") ?? null,
+    // 条款正文写「“我们”、“本公司”均指…」，客户信写「感谢您对…」，前缀都要剔掉
+    insurer: insurer?.value.replace(/^(均指|指|感谢您对|尊敬的|您投保的|本保险由)/, "") ?? null,
     product_name: productName,
     policy_no: policyNo?.value ?? null,
     category: inferCategory([productName, insurer?.value ?? null]),

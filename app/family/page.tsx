@@ -71,7 +71,7 @@ export default async function FamilyPage({
         <h1 className="text-lg font-semibold tracking-tight">家庭总览</h1>
         <p className="mt-1.5 text-xs leading-6 text-slate-500">
           {members.length} 位被保险人 · 在保 {policies.length} 份
-          {totalPremium > 0 ? ` · 已识别保费合计 ${formatMoney(totalPremium)}` : ""}
+          {totalPremium > 0 ? ` · 已识别保费合计 ${formatMoney(totalPremium)}（共同被保只算一份）` : ""}
           {withoutPremium > 0 ? `（另有 ${withoutPremium} 份未识别保费，不计入合计）` : ""}
           {totalReview > 0 ? ` · ${totalReview} 处待复核` : ""}
           {archived > 0 ? ` · 已过期 ${archived} 份（见文末归档，不参与计算）` : ""}
@@ -190,8 +190,16 @@ export default async function FamilyPage({
                   <span className="ml-2 font-normal text-slate-400">{member.policies.length} 份保单</span>
                 </h2>
                 <p className="flex flex-wrap items-center gap-x-3 text-xs text-slate-400">
-                  {member.premium > 0 ? <span>保费 {formatMoney(member.premium)}</span> : null}
-                  {member.shared > 0 ? <span>另有 {member.shared} 份共同被保（保费已计入对方）</span> : null}
+                  {member.premium > 0 ? (
+                    <span>
+                      保费 {formatMoney(member.premium)}
+                      {member.sharedPremium > 0 && member.sharedPremium < member.premium ? (
+                        <span className="text-slate-400">（含共同被保 {formatMoney(member.sharedPremium)}）</span>
+                      ) : member.sharedPremium > 0 ? (
+                        <span className="text-slate-400">（共同被保）</span>
+                      ) : null}
+                    </span>
+                  ) : null}
                   {member.needsReview > 0 ? <span className="text-amber-700">{member.needsReview} 处待复核</span> : null}
                   <Link
                     href={`/stack?name=${encodeURIComponent(member.name)}`}
