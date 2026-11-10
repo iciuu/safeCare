@@ -104,7 +104,7 @@ export default async function EstimatePage({
   return (
     <main className="mx-auto max-w-4xl px-6 py-10">
       <Link href={`/documents/${documentId}`} className="text-xs text-slate-500 hover:text-slate-900">
-        ← 返回 {context.document.filename}
+        ← 返回 {context.productName ?? context.document.filename}
       </Link>
 
       <header className="mt-4 mb-6">
@@ -201,9 +201,12 @@ export default async function EstimatePage({
                 费用发生时间
                 <select name="waiting" defaultValue={inWaiting ? "before" : "after"} className={fieldClass}>
                   <option value="after">
-                    等待期后{context.waitingDays === null ? "" : `（已过 ${context.waitingDays} 天）`}
+                    等待期后
+                    {context.waitingDays ? `（已过 ${context.waitingDays} 天）` : "（这份保单没有疾病等待期）"}
                   </option>
-                  <option value="before">等待期内（含投保后 90 天内发病）</option>
+                  {context.waitingDays ? (
+                    <option value="before">等待期内（含投保后 {context.waitingDays} 天内发病）</option>
+                  ) : null}
                 </select>
               </label>
 
@@ -282,9 +285,11 @@ export default async function EstimatePage({
                       {toAmount(field("other")) > 0 ? ` − 其他途径 ${formatMoney(toAmount(field("other")))} 元` : ""}
                       {" = "}
                       <span className="font-medium text-slate-900">基数 {formatMoney(result.base)} 元</span>
-                      <span className="ml-1">
-                        依据 <RefLink id={documentId} target={context.refs.compensation} />
-                      </span>
+                      {context.refs.compensation ? (
+                        <span className="ml-1">
+                          依据 <RefLink id={documentId} target={context.refs.compensation} />
+                        </span>
+                      ) : null}
                     </p>
                   </div>
 
@@ -321,14 +326,19 @@ export default async function EstimatePage({
                     </table>
                   ) : null}
 
-                  <p className="text-xs text-slate-500">
-                    比例依据 <RefLink id={documentId} target={context.refs.benefitTable} />
-                    {context.annualLimit === null ? null : (
-                      <>
-                        {" · "}限额依据 <RefLink id={documentId} target={context.refs.limit} />
-                      </>
-                    )}
-                  </p>
+                  {context.refs.benefitTable || (context.annualLimit !== null && context.refs.limit) ? (
+                    <p className="text-xs text-slate-500">
+                      {context.refs.benefitTable ? (
+                        <>比例依据 <RefLink id={documentId} target={context.refs.benefitTable} /></>
+                      ) : null}
+                      {context.annualLimit !== null && context.refs.limit ? (
+                        <>
+                          {context.refs.benefitTable ? " · " : null}限额依据{" "}
+                          <RefLink id={documentId} target={context.refs.limit} />
+                        </>
+                      ) : null}
+                    </p>
+                  ) : null}
                 </div>
               )}
 

@@ -1,7 +1,17 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { DocumentViewer } from "@/components/document-viewer";
+import { resolveElementAction } from "@/app/policy-actions";
 import { getDb } from "@/lib/db";
+import {
+  AMOUNT_CATEGORIES,
+  CONDITION_CATEGORIES,
+  ELEMENT_KIND_LABELS,
+  categoryLabel,
+  exclusionGroupOf,
+  groupExclusions,
+  type ElementKind,
+} from "@/lib/elements";
 import type { PolicyMeta } from "@/lib/policy-meta";
 
 export const dynamic = "force-dynamic";
@@ -85,6 +95,13 @@ const AI_KIND_LABEL: Record<string, string> = {
   other: "其他",
 };
 
+const ELEMENT_FILTERS: { label: string; kind: ElementKind | null }[] = [
+  { label: "全部", kind: null },
+  { label: "责任", kind: "coverage" },
+  { label: "免责", kind: "exclusion" },
+  { label: "金额与期间", kind: "term" },
+];
+
 const CATEGORY_LABEL: Record<string, string> = {
   coverage: "保险责任",
   exclusion: "责任免除",
@@ -155,10 +172,10 @@ export default async function DocumentPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ p?: string; q?: string }>;
+  searchParams: Promise<{ p?: string; q?: string; kind?: string; eq?: string; reviewed?: string }>;
 }) {
   const { id } = await params;
-  const { p: pageParam, q: quoteParam } = await searchParams;
+  const { p: pageParam, q: quoteParam, kind: kindParam, eq: eqParam, reviewed } = await searchParams;
   const focusPage = Number(pageParam);
   const documentId = Number(id);
   if (!Number.isInteger(documentId) || documentId <= 0) notFound();
@@ -200,10 +217,29 @@ export default async function DocumentPage({
     }
   }
 
+  // 最近一次 AI 抽取的版本与花费：改了提示词后跑一遍就能看出差别
+  const lastRun = db
+    .prepare(
+      "SELECT engine, model, prompt_version, tokens, status, started_at, finished_at FROM extraction_run WHERE document_id = ? AND stage IN ('ai_extract', 'ai_enrich') ORDER BY id DESC LIMIT 1",
+    )
+    .get(documentId) as
+    | {
+        engine: string | null;
+        model: string | null;
+        prompt_version: string | null;
+        tokens: number | null;
+        status: string;
+        started_at: string;
+        finished_at: string | null;
+      }
+    | undefined;
+
   const benefits: BenefitView[] = policyRow
     ? (
         db
-          .prepare("SELECT id, name, data FROM coverage WHERE policy_id = ? ORDER BY id")
+          .prepare(
+            "SELECT id, name, data FROM coverage WHERE policy_id = ? ORDER BY CASE WHEN source = 'ai' THEN 0 ELSE 1 END, id",
+          )
           .all(policyRow.id) as unknown as { id: number; name: string | null; data: string }[]
       ).map((row) => {
         let parsed: { hospital_scope?: string | null; tiers?: { when: string; ratio: number }[] } = {};
@@ -249,42 +285,129 @@ export default async function DocumentPage({
     })),
   );
 
-  const exclusionFacts: QuickItem[] = flatFacts
-    .filter((fact) => fact.kind === "exclusion")
-    .map((fact) => ({
-      label: fact.label || "免责情形",
-      value: fact.value,
-      unit: fact.unit,
-      condition: fact.condition,
-      quote: fact.quote,
-      page: fact.page,
-    }));
+  // 新链路：AI 抽要素、本地归类后落在 policy_element，三种险种共用同一套读法
+  const elementRows = (
+    db
+      .prepare(
+        "SELECT id, kind, category, label, value, unit, condition, quote, page_no, clause_no, review_status FROM policy_element WHERE document_id = ? ORDER BY page_no, id",
+      )
+      .all(documentId) as unknown as {
+      id: number;
+      kind: ElementKind;
+      category: string | null;
+      label: string;
+      value: string;
+      unit: string;
+      condition: string;
+      quote: string;
+      page_no: number;
+      clause_no: string | null;
+      review_status: string;
+    }[]
+  ).map((row) => ({ ...row }));
 
-  const amountFacts: QuickItem[] = flatFacts
-    .filter((fact) => fact.kind !== "exclusion" && ["limit", "ratio", "deductible"].includes(fact.type))
-    .map((fact) => ({
-      label: fact.label || "金额",
-      value: fact.value,
-      unit: fact.unit,
-      condition: fact.condition,
-      quote: fact.quote,
-      page: fact.page,
-    }));
+  // 被人工忽略的要素不再参与速查卡、列表和计数（终态是 ignored，不是删除，重跑 AI 也不会丢）
+  const visibleElements = elementRows.filter((row) => row.review_status !== "ignored");
+  const useElements = visibleElements.length > 0;
 
-  const conditionFacts: QuickItem[] = flatFacts
-    .filter(
-      (fact) =>
-        fact.kind !== "exclusion" && ["waiting_period", "period", "scope"].includes(fact.type),
-    )
-    .map((fact) => ({
-      label: fact.label || "条件",
-      value: fact.value,
-      unit: fact.unit,
-      condition: fact.condition,
-      quote: fact.quote,
-      page: fact.page,
-    }));
+  // 免责条目在保单里是并列列表，带上网关类别只是为了归组展示，不改变任何判断
+  const exclusionItems: (QuickItem & { category: string | null; clauseNo: string | null })[] = useElements
+    ? visibleElements
+        .filter((row) => row.kind === "exclusion")
+        .map((row) => ({
+          label: row.label || "免责情形",
+          value: row.value,
+          unit: row.unit,
+          condition: row.condition,
+          quote: row.quote,
+          page: row.page_no,
+          category: row.category ?? null,
+          clauseNo: row.clause_no ?? null,
+        }))
+    : flatFacts
+        .filter((fact) => fact.kind === "exclusion")
+        .map((fact) => ({
+          label: fact.label || "免责情形",
+          value: fact.value,
+          unit: fact.unit,
+          condition: fact.condition,
+          quote: fact.quote,
+          page: fact.page,
+          category: fact.type ?? null,
+          clauseNo: null,
+        }));
 
+  const exclusionFacts: QuickItem[] = exclusionItems;
+  const exclusionGroups = groupExclusions(exclusionItems);
+  // 老数据的 category 可能是旧词表，展示时统一按新归类走
+  const exclusionGroupLabel = new Map<number, string>(
+    visibleElements
+      .filter((row) => row.kind === "exclusion")
+      .map((row) => [row.id, exclusionGroupOf(row).label] as const),
+  );
+
+  const amountFacts: QuickItem[] = (
+    useElements
+      ? visibleElements
+          .filter((row) => row.kind === "term" && AMOUNT_CATEGORIES.has(row.category ?? ""))
+          .map((row) => ({
+            label: row.label || "金额",
+            value: row.value,
+            unit: row.unit,
+            condition: row.condition,
+            quote: row.quote,
+            page: row.page_no,
+          }))
+      : flatFacts
+          .filter((fact) => fact.kind !== "exclusion" && ["limit", "ratio", "deductible"].includes(fact.type))
+          .map((fact) => ({
+            label: fact.label || "金额",
+            value: fact.value,
+            unit: fact.unit,
+            condition: fact.condition,
+            quote: fact.quote,
+            page: fact.page,
+          }))
+  );
+
+  const conditionFacts: QuickItem[] = useElements
+    ? visibleElements
+        .filter((row) => row.kind === "term" && CONDITION_CATEGORIES.has(row.category ?? ""))
+        .map((row) => ({
+          label: row.label || "条件",
+          value: row.value,
+          unit: row.unit,
+          condition: row.condition,
+          quote: row.quote,
+          page: row.page_no,
+        }))
+    : flatFacts
+        .filter(
+          (fact) =>
+            fact.kind !== "exclusion" && ["waiting_period", "period", "scope"].includes(fact.type),
+        )
+        .map((fact) => ({
+          label: fact.label || "条件",
+          value: fact.value,
+          unit: fact.unit,
+          condition: fact.condition,
+          quote: fact.quote,
+          page: fact.page,
+        }));
+
+  const pendingElements = visibleElements.filter((row) => row.review_status === "needs_review");
+
+  // 要素检索：险种大类 + 关键词，只影响列表，不影响速查卡
+  const activeKind = ELEMENT_FILTERS.some((filter) => filter.kind && filter.kind === kindParam)
+    ? (kindParam as ElementKind)
+    : null;
+  const eqQuery = (eqParam ?? "").trim();
+  const filteredElements = visibleElements.filter((row) => {
+    if (activeKind && row.kind !== activeKind) return false;
+    if (!eqQuery) return true;
+    const haystack = `${row.label}${row.value}${row.condition}${row.quote}`.toLowerCase();
+    return haystack.includes(eqQuery.toLowerCase());
+  });
   const pending = aiRows.filter((row) => row.review_status !== "ok" || row.facts.length === 0);
   const aiConfigured = Boolean(process.env.DEEPSEEK_API_KEY);
 
@@ -317,12 +440,18 @@ export default async function DocumentPage({
   return (
     <main className="mx-auto max-w-6xl px-6 py-10">
       <Link href="/" className="text-xs text-slate-500 hover:text-slate-900">
-        ← 返回文档列表
+        ← 返回保单管理
       </Link>
 
       <header className="mt-4 mb-6">
-        <h1 className="truncate text-lg font-semibold tracking-tight">{document.filename}</h1>
+        {/* 上传的文件名常是「17.pdf」这种，正式名称以保单上的产品名为准 */}
+        <h1 className="truncate text-lg font-semibold tracking-tight">
+          {policy?.product_name ?? document.filename}
+        </h1>
         <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+          {policy?.insurer ? <span>{policy.insurer}</span> : null}
+          {policy?.policy_no ? <span>保单号 {policy.policy_no}</span> : null}
+          <span className="max-w-full truncate">文件 {document.filename}</span>
           <span>{document.page_count} 页</span>
           <span>{document.char_count.toLocaleString("zh-CN")} 字</span>
           <span>上传于 {document.created_at}</span>
@@ -331,6 +460,12 @@ export default async function DocumentPage({
           )}
         </p>
       </header>
+
+      {reviewed === "1" ? (
+        <p className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+          已处理一条待复核要素；速查卡和计数已经跟着更新。
+        </p>
+      ) : null}
 
       {policy ? (
         <section className="mb-8 rounded-xl border border-slate-200 bg-white p-4">
@@ -364,7 +499,7 @@ export default async function DocumentPage({
         </div>
       </section>
 
-      {flatFacts.length > 0 ? (
+      {flatFacts.length > 0 || elementRows.length > 0 ? (
         <section className="mb-8">
           <div className="mb-2 flex items-baseline justify-between gap-3">
             <h2 className="text-sm font-semibold text-slate-900">速查卡</h2>
@@ -374,7 +509,13 @@ export default async function DocumentPage({
             <QuickColumn
               id={documentId}
               title={`报不报 · 免责 ${exclusionFacts.length} 项`}
-              hint="以下情形不承担给付责任"
+              hint={
+                exclusionGroups.length > 0
+                  ? `以下情形不承担给付责任 · 分 ${
+                      exclusionGroups.length
+                    } 类，下拉看全部`
+                  : "以下情形不承担给付责任"
+              }
               items={exclusionFacts.slice(0, 6)}
               empty="还没抽到免责情形"
             />
@@ -396,7 +537,168 @@ export default async function DocumentPage({
         </section>
       ) : null}
 
-      {aiRows.length > 0 ? (
+      {exclusionGroups.length > 0 ? (
+        <section id="exclusions" className="mb-8">
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-900">免责条款 · 按类看</h2>
+            <p className="text-xs text-slate-500">
+              {exclusionItems.length} 条 · {exclusionGroups.length} 类 · 归类只为本机好找，不改条款原文
+            </p>
+          </div>
+          <div className="space-y-2">
+            {exclusionGroups.map((group, index) => (
+              <details
+                key={group.id}
+                open={index === 0}
+                className="overflow-hidden rounded-xl border border-slate-200 bg-white"
+              >
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-2.5 text-xs hover:bg-slate-50">
+                  <span className="font-medium text-slate-900">{group.label}</span>
+                  <span className="shrink-0 tabular-nums text-slate-400">
+                    {group.items.length} 条 ▾
+                  </span>
+                </summary>
+                <ul className="divide-y divide-slate-100 border-t border-slate-100">
+                  {group.items.map((item, itemIndex) => (
+                    <li key={`${item.label}-${item.page}-${itemIndex}`} className="px-4 py-2 text-xs">
+                      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                        <p className="min-w-0 flex-1 text-slate-800">
+                          {item.value || item.label}
+                          {item.condition ? (
+                            <span className="ml-1 text-slate-500">{item.condition}</span>
+                          ) : null}
+                        </p>
+                        <a
+                          href={`/documents/${documentId}?p=${item.page}&q=${encodeURIComponent(item.quote.slice(0, 60))}#doc`}
+                          className="shrink-0 text-sky-700 underline decoration-dotted underline-offset-2"
+                        >
+                          P{item.page}
+                          {item.clauseNo ? ` · ${item.clauseNo}` : ""}
+                        </a>
+                      </div>
+                      {item.quote && item.quote !== item.value ? (
+                        <p className="mt-0.5 line-clamp-2 text-slate-500">「{item.quote}」</p>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-slate-400">
+            免责是并列的多条，这里按发生情形归堆，方便一眼看完；具体认定以条款原文和保险公司核定为准。
+          </p>
+        </section>
+      ) : null}
+
+      {useElements ? (
+        <section id="elements" className="mb-8">
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-900">全部要素（AI 抄录 · 本地归类）</h2>
+            <p className="text-xs text-slate-500">
+              {filteredElements.length === visibleElements.length
+                ? `${visibleElements.length} 条`
+                : `${filteredElements.length} / ${visibleElements.length} 条`} · 每条都带页码和原文引文
+            </p>
+          </div>
+
+          <form action={`/documents/${documentId}`} className="mb-3 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap gap-1">
+              {ELEMENT_FILTERS.map((filter) => {
+                const active = activeKind === filter.kind;
+                const params = new URLSearchParams();
+                if (filter.kind) params.set("kind", filter.kind);
+                if (eqQuery) params.set("eq", eqQuery);
+                const query = params.toString();
+                return (
+                  <Link
+                    key={filter.label}
+                    href={`/documents/${documentId}${query ? `?${query}` : ""}#elements`}
+                    className={`rounded-full border px-2.5 py-1 text-xs ${
+                      active
+                        ? "border-slate-900 bg-slate-900 text-white"
+                        : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                    }`}
+                  >
+                    {filter.label}
+                  </Link>
+                );
+              })}
+            </div>
+            {activeKind ? <input type="hidden" name="kind" value={activeKind} /> : null}
+            <input
+              name="eq"
+              defaultValue={eqQuery}
+              placeholder="搜关键词：质子重离子、免赔额、药品…"
+              className="min-w-0 flex-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs sm:max-w-xs"
+            />
+            <button type="submit" className="rounded-md bg-slate-900 px-3 py-1.5 text-xs text-white">
+              搜要素
+            </button>
+            {activeKind || eqQuery ? (
+              <Link href={`/documents/${documentId}#elements`} className="text-xs text-slate-500 hover:text-slate-900">
+                清除
+              </Link>
+            ) : null}
+          </form>
+
+          {filteredElements.length === 0 ? (
+            <p className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-500">
+              没有匹配的要素，换个词或去掉筛选。
+            </p>
+          ) : null}
+
+          <div className="space-y-2">
+            {filteredElements.map((row) => (
+              <div key={row.id} className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                  <p className="text-xs text-slate-800">
+                    <span className="mr-1.5 rounded bg-slate-100 px-1.5 py-0.5 text-slate-500">
+                      {ELEMENT_KIND_LABELS[row.kind]}
+                    </span>
+                    <span className="mr-1.5 text-slate-400">
+                      {row.kind === "exclusion"
+                        ? (exclusionGroupLabel.get(row.id) ?? categoryLabel(row.kind, row.category ?? ""))
+                        : categoryLabel(row.kind, row.category ?? "")}
+                    </span>
+                    <span className="font-medium">{row.label || "未命名要素"}</span>
+                    {row.value ? (
+                      <span className="ml-1 font-medium text-slate-900">
+                        {row.value}
+                        {row.unit ? ` ${row.unit}` : ""}
+                      </span>
+                    ) : null}
+                    {row.condition ? <span className="ml-1 text-slate-500">{row.condition}</span> : null}
+                  </p>
+                  <a
+                    href={`/documents/${documentId}?p=${row.page_no}&q=${encodeURIComponent(row.quote.slice(0, 60))}#doc`}
+                    className="shrink-0 text-xs text-sky-700 underline decoration-dotted underline-offset-2"
+                  >
+                    P{row.page_no}
+                    {row.clause_no ? ` · ${row.clause_no}` : ""}
+                  </a>
+                </div>
+                {row.quote ? (
+                  <p className="mt-1 line-clamp-2 text-xs text-slate-500">「{row.quote}」</p>
+                ) : null}
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-slate-400">
+            模型只负责从原文抄要素，归类、去重、冲突标记都在本机做；引文反查不过的一条都没留。
+          </p>
+          {lastRun ? (
+            <p className="mt-1 text-xs text-slate-400">
+              上次抽取 {lastRun.engine ?? "deepseek"} / {lastRun.model ?? "—"} · 提示词{" "}
+              {lastRun.prompt_version ?? "未记录"} · {lastRun.tokens ? `${lastRun.tokens.toLocaleString("zh-CN")} token` : "token 未记录"}{" "}
+              · {lastRun.status === "succeeded" || lastRun.status === "ok" ? "成功" : lastRun.status} ·{" "}
+              {lastRun.finished_at ?? lastRun.started_at}
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+
+      {!useElements && aiRows.length > 0 ? (
         <section className="mb-8">
           <div className="mb-2 flex items-baseline justify-between gap-3">
             <h2 className="text-sm font-semibold text-slate-900">保障要点（AI 抽取）</h2>
@@ -450,7 +752,7 @@ export default async function DocumentPage({
         </section>
       ) : aiConfigured ? (
         <p className="mb-8 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
-          AI 增补没有跑成功，本地规则结果不受影响。
+          AI 要素抽取没有跑成功，本地规则结果不受影响。
         </p>
       ) : (
         <p className="mb-8 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-500">
@@ -461,7 +763,7 @@ export default async function DocumentPage({
       {benefits.length > 0 || policy?.benefit_table?.annual_limit ? (
         <section className="mb-8">
           <div className="mb-2 flex items-baseline justify-between gap-3">
-            <h2 className="text-sm font-semibold text-slate-900">保障表（本地规则补充）</h2>
+            <h2 className="text-sm font-semibold text-slate-900">保障表 · 责任与给付比例</h2>
             <p className="text-right text-xs text-slate-500">
               {policy?.benefit_table?.annual_limit
                 ? `年度限额 ${(policy.benefit_table.annual_limit / 10000).toLocaleString("zh-CN")} 万元`
@@ -471,7 +773,7 @@ export default async function DocumentPage({
                 : ""}
             </p>
           </div>
-          <p className="mb-2 text-xs text-slate-400">AI 没覆盖到的范围才看这里；数字与条件以条款原文为准。</p>
+          <p className="mb-2 text-xs text-slate-400">AI 认出的责任排在前面；本地规则切到的附表条目随后，数字与条件以条款原文为准。</p>
           <div className="space-y-2">
             {benefits.length === 0 ? (
               <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
@@ -508,7 +810,101 @@ export default async function DocumentPage({
         </section>
       ) : null}
 
-      {pending.length > 0 ? (
+      {useElements && pendingElements.length > 0 ? (
+        <section id="review" className="mb-8 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+          <h2 className="text-sm font-semibold text-amber-800">待复核 · {pendingElements.length} 条</h2>
+          <p className="mt-0.5 text-xs text-amber-700">
+            同一条事实在保单里前后给了不同值（或模型没给全），没有替它选。对照下面的原文引文确认、改对，或者直接忽略这条。
+          </p>
+          <ul className="mt-3 space-y-2">
+            {pendingElements.map((row) => (
+              <li key={row.id} className="rounded-lg border border-amber-200 bg-white px-3 py-2">
+                <form action={resolveElementAction} className="space-y-2">
+                  <input type="hidden" name="documentId" value={documentId} />
+                  <input type="hidden" name="elementId" value={row.id} />
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs">
+                    <span className="text-amber-900">
+                      {ELEMENT_KIND_LABELS[row.kind]} · P{row.page_no}
+                      {row.clause_no ? ` · ${row.clause_no}` : ""}
+                    </span>
+                    <a
+                      href={`/documents/${documentId}?p=${row.page_no}&q=${encodeURIComponent(row.quote.slice(0, 60))}#doc`}
+                      className="text-sky-700 underline decoration-dotted underline-offset-2"
+                    >
+                      看原文
+                    </a>
+                  </div>
+                  {row.quote ? (
+                    <p className="line-clamp-2 text-xs text-slate-500">「{row.quote}」</p>
+                  ) : null}
+                  <div className="flex flex-wrap gap-1.5">
+                    <label className="flex items-center gap-1 text-xs text-slate-500">
+                      标签
+                      <input
+                        name="label"
+                        defaultValue={row.label}
+                        className="w-28 rounded border border-slate-200 px-2 py-1 text-xs text-slate-900"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-xs text-slate-500">
+                      值
+                      <input
+                        name="value"
+                        defaultValue={row.value}
+                        className="w-32 rounded border border-slate-200 px-2 py-1 text-xs text-slate-900"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-xs text-slate-500">
+                      单位
+                      <input
+                        name="unit"
+                        defaultValue={row.unit}
+                        className="w-16 rounded border border-slate-200 px-2 py-1 text-xs text-slate-900"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-xs text-slate-500">
+                      条件
+                      <input
+                        name="condition"
+                        defaultValue={row.condition}
+                        className="w-32 rounded border border-slate-200 px-2 py-1 text-xs text-slate-900"
+                      />
+                    </label>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="submit"
+                      name="action"
+                      value="save"
+                      className="rounded bg-slate-900 px-2.5 py-1 text-xs text-white"
+                    >
+                      保存修正
+                    </button>
+                    <button
+                      type="submit"
+                      name="action"
+                      value="confirm"
+                      className="rounded border border-slate-300 px-2.5 py-1 text-xs text-slate-700"
+                    >
+                      原样确认
+                    </button>
+                    <button
+                      type="submit"
+                      name="action"
+                      value="ignore"
+                      className="rounded px-2.5 py-1 text-xs text-slate-500 hover:text-slate-900"
+                    >
+                      忽略这条
+                    </button>
+                  </div>
+                </form>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {!useElements && pending.length > 0 ? (
         <section className="mb-8 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
           <h2 className="text-sm font-semibold text-amber-800">待复核 · {pending.length} 条</h2>
           <p className="mt-0.5 text-xs text-amber-700">

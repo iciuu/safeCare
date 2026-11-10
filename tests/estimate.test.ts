@@ -57,6 +57,22 @@ function input(overrides: Partial<EstimateInput> = {}): EstimateInput {
   };
 }
 
+test("档位解析：AI 抄回来的「不超过/超过 5000 元」也要认成金额分档", () => {
+  // 模型把「未以社保身份就诊」拆成单独一条、且不带金额时，按顺序挂到上一条金额档
+  assert.deepEqual(
+    parseTiers([
+      { when: "余额累计不超过5000元的部分", ratio: 0.8 },
+      { when: "未以社保身份就诊", ratio: 0.48 },
+      { when: "余额累计超过5000元的部分", ratio: 1 },
+      { when: "未以社保身份就诊", ratio: 0.6 },
+    ]),
+    [
+      { label: "累计≤5000元", upto: 5000, ratio: 0.8, noSocialRatio: 0.48 },
+      { label: "累计>5000元", upto: null, ratio: 1, noSocialRatio: 0.6 },
+    ],
+  );
+});
+
 test("档位解析：金额分档与社保降档合并到同一档", () => {
   assert.deepEqual(general.tiers, [
     { label: "累计≤5000元", upto: 5000, ratio: 0.8, noSocialRatio: 0.48 },

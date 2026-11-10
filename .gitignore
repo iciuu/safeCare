@@ -6,6 +6,8 @@ next-env.d.ts
 
 # 本地数据：保单原件、SQLite 库、脱敏映射表，绝不入库
 data/
+# npm run backup 的产物，同样是原文和保单数据
+backups/
 
 .env
 .env.local

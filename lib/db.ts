@@ -10,7 +10,7 @@ const DB_FILE = path.join(DATA_DIR, "safecare.db");
  * 表结构对应 docs/PLAN.md §4；险种差异字段（coverage/exclusion/term 的细节）
  * 以 JSON 存在 data 列，具体形状见 docs/FIELDS.md。
  */
-const DDL = `
+export const DDL = `
 CREATE TABLE IF NOT EXISTS member (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -159,6 +159,40 @@ CREATE TABLE IF NOT EXISTS redaction_map (
   UNIQUE (document_id, placeholder)
 );
 
+-- 保单要素：AI 抽出来的「一条事实」，带引文和页码，本地归类后落在这里。
+-- 三栏速查卡直接读这张表，不再依赖某家公司的排版。
+CREATE TABLE IF NOT EXISTS policy_element (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER NOT NULL REFERENCES document(id) ON DELETE CASCADE,
+  policy_id INTEGER REFERENCES policy(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  category TEXT,
+  label TEXT NOT NULL DEFAULT '',
+  value TEXT NOT NULL DEFAULT '',
+  unit TEXT NOT NULL DEFAULT '',
+  condition TEXT NOT NULL DEFAULT '',
+  quote TEXT NOT NULL DEFAULT '',
+  page_no INTEGER NOT NULL,
+  clause_no TEXT,
+  clause_id INTEGER REFERENCES clause(id) ON DELETE SET NULL,
+  confidence REAL NOT NULL DEFAULT 0.7,
+  review_status TEXT NOT NULL DEFAULT 'ok',
+  source TEXT NOT NULL DEFAULT 'ai',
+  dedupe_key TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (document_id, source, dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS idx_element_document ON policy_element(document_id, kind, page_no);
+
+CREATE TABLE IF NOT EXISTS element_review (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  element_id INTEGER NOT NULL REFERENCES policy_element(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  before_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS qa_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   question TEXT NOT NULL,
@@ -178,6 +212,8 @@ export function getDb(): DatabaseSync {
     db = new DatabaseSync(DB_FILE);
     db.exec("PRAGMA journal_mode = WAL;");
     db.exec("PRAGMA foreign_keys = ON;");
+    // 两个上传同时落库时默认会直接 SQLITE_BUSY，等一会儿比报错好
+    db.exec("PRAGMA busy_timeout = 5000;");
     db.exec(DDL);
     holder.__safecareDb = db;
   }
@@ -191,8 +227,42 @@ export function getDb(): DatabaseSync {
   // 责任/免责行来自哪一层：ai 的行每次重跑整体替换，rules 的行保留
   ensureColumn(db, "exclusion", "source", "source TEXT NOT NULL DEFAULT 'rules'");
   ensureColumn(db, "term", "source", "source TEXT NOT NULL DEFAULT 'rules'");
+  // 责任行同样分 ai / rules 两层：AI 那层整批替换，规则那层留着兜底
+  ensureColumn(db, "coverage", "source", "source TEXT NOT NULL DEFAULT 'rules'");
 
-  // 老库里没有 clause_ai，建表语句是幂等的，每次取连接补一下
+  // 老库里没有 clause_ai / policy_element，建表语句是幂等的，每次取连接补一下
+  db.exec(`CREATE TABLE IF NOT EXISTS policy_element (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER NOT NULL REFERENCES document(id) ON DELETE CASCADE,
+  policy_id INTEGER REFERENCES policy(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  category TEXT,
+  label TEXT NOT NULL DEFAULT '',
+  value TEXT NOT NULL DEFAULT '',
+  unit TEXT NOT NULL DEFAULT '',
+  condition TEXT NOT NULL DEFAULT '',
+  quote TEXT NOT NULL DEFAULT '',
+  page_no INTEGER NOT NULL,
+  clause_no TEXT,
+  clause_id INTEGER REFERENCES clause(id) ON DELETE SET NULL,
+  confidence REAL NOT NULL DEFAULT 0.7,
+  review_status TEXT NOT NULL DEFAULT 'ok',
+  source TEXT NOT NULL DEFAULT 'ai',
+  dedupe_key TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (document_id, source, dedupe_key)
+);`);
+
+  // 复核记录：谁改了什么、改之前是什么，都留一份，AI 重跑也能对得上
+  db.exec(`CREATE TABLE IF NOT EXISTS element_review (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  element_id INTEGER NOT NULL REFERENCES policy_element(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  before_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);`);
+
   db.exec(`CREATE TABLE IF NOT EXISTS clause_ai (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   clause_id INTEGER NOT NULL REFERENCES clause(id) ON DELETE CASCADE,

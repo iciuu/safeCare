@@ -33,6 +33,8 @@ export type EstimateBenefit = {
   /** 允许的就诊范围标签，与 `benefit-table.ts` 的输出保持一致 */
   scopes: string[];
   tiers: TierRule[];
+  /** 这项责任自己的保额上限（定额给付型保单没有比例，只能按保额封顶） */
+  cap?: number | null;
   /** table = 从附表抽出来的；builtin = 附表没抽出来，用同产品内置规则 */
   source: "table" | "builtin";
 };
@@ -166,17 +168,27 @@ function normalize(text: string): string {
  */
 export function parseTiers(tiers: { when: string; ratio: number }[]): TierRule[] {
   const rules: TierRule[] = [];
+  // 模型常把「未以社保身份就诊」单独列一条、不带金额上限：按顺序挂到上一条金额档上
+  let lastBand: TierRule | null = null;
 
   for (const tier of tiers) {
     if (!Number.isFinite(tier.ratio) || tier.ratio <= 0) continue;
     const when = normalize(tier.when ?? "");
     const social = /未以(基本医疗保险|公费医疗|社保)/.test(when);
-    const amount = when.match(/(≤|<|>|≥|>=)\s*([\d.]+)\s*元/);
-    const limit = amount ? Number(amount[2]) : null;
-    const upto = limit === null ? null : /[≤<]/.test(amount![1]) ? limit : null;
-    const label = amount
-      ? `${/[≤<]/.test(amount[1]) ? "累计≤" : "累计>"}${amount[2]}元`
+    // 附表原话是「累计≤5000 元」，AI 抄回来的常是「余额累计不超过 5000 元的部分」，两种都要认
+    const atMost = when.match(/(?:不超过|不高于|最多|以内|以下|≤|<)\s*([\d.]+)\s*元/);
+    const moreThan = when.match(/(?:超过|高于|以上|≥|>)\s*([\d.]+)\s*元/);
+    const boundary = atMost ?? moreThan;
+    const limit = boundary ? Number(boundary[1]) : null;
+    const upto = atMost ? limit : null;
+    const label = boundary
+      ? `${atMost ? "累计≤" : "累计>"}${boundary[1]}元`
       : "标准情形";
+
+    if (!boundary && social && lastBand) {
+      lastBand.noSocialRatio = tier.ratio;
+      continue;
+    }
 
     let rule = rules.find((item) => item.upto === upto && item.label === label);
     if (!rule) {
@@ -185,6 +197,7 @@ export function parseTiers(tiers: { when: string; ratio: number }[]): TierRule[]
     }
     if (social) rule.noSocialRatio = tier.ratio;
     else rule.ratio = tier.ratio;
+    lastBand = rule;
   }
 
   return rules.sort((a, b) => (a.upto ?? Number.POSITIVE_INFINITY) - (b.upto ?? Number.POSITIVE_INFINITY));
@@ -194,9 +207,27 @@ export type CoverageRowInput = {
   name: string | null;
   hospital_scope: string | null;
   tiers: { when: string; ratio: number }[];
+  annual_limit?: number | null;
 };
 
 /** 责任清单：附表里出现的责任都列出来；比例优先用附表抽取值，抽不到才退到内置规则。 */
+/** 责任写的是哪类就诊范围，映射到估算页的下拉选项。 */
+export function scopeOf(name: string, hospitalScope: string | null): string[] {
+  const text = `${name} ${hospitalScope ?? ""}`;
+  if (/质子重离子/.test(text)) return [SCOPE_PROTON];
+  if (/药店|特定药品/.test(text)) return [SCOPE_PHARMACY];
+  if (/特需|国际部|VIP/.test(text)) return [SCOPE_VIP, SCOPE_GENERAL];
+  if (!hospitalScope) return [SCOPE_GENERAL];
+  if (/指定医院|其他医院|非公立/.test(text)) return [SCOPE_OTHER, SCOPE_GENERAL];
+  return [SCOPE_GENERAL];
+}
+
+/**
+ * 责任清单完全从库里读：
+ * 1. 有分级比例的责任（附表规则或 AI 抽的都算）直接列出来；
+ * 2. 附表里提到但没抽到比例的责任，用同产品内置规则兜底；
+ * 3. 两边都没提到就不显示——不替增责任。
+ */
 export function buildPlan(input: {
   coverage: CoverageRowInput[];
   benefitTableText: string | null;
@@ -204,6 +235,36 @@ export function buildPlan(input: {
   const table = input.benefitTableText ? normalize(input.benefitTableText) : "";
   const benefits: EstimateBenefit[] = [];
   const notes: string[] = [];
+  const taken = new Set<string>();
+
+  // 先列库里有比例的责任（任何险种都适用）
+  for (const row of input.coverage) {
+    const name = (row.name ?? "").trim();
+    if (!name) continue;
+    const key = normalize(name);
+    if (taken.has(key)) continue;
+
+    const tiers = parseTiers(row.tiers);
+    const usable = tiers.some((tier) => tier.ratio > 0);
+    const limit = typeof row.annual_limit === "number" && row.annual_limit > 0 ? row.annual_limit : null;
+
+    // 定额给付/一次性给付型（意外骨折、身故、伤残）没有比例可乘，只能按保额封顶
+    if (!usable && limit === null) continue;
+
+    taken.add(key);
+    benefits.push({
+      key: `row-${benefits.length}`,
+      name,
+      scopes: scopeOf(name, row.hospital_scope),
+      tiers: usable ? tiers : [{ label: "按保额封顶", upto: null, ratio: 1, noSocialRatio: null }],
+      cap: usable ? limit : limit,
+      source: "table",
+    });
+  }
+
+  if (benefits.some((item) => item.cap !== null && item.cap !== undefined)) {
+    notes.push("带「按保额封顶」的责任没有可乘的给付比例：这里只算到保额上限，实际要按合同里的给付比例表核定。");
+  }
 
   for (const spec of BENEFIT_SPECS) {
     const row = input.coverage.find((item) => {
@@ -215,6 +276,8 @@ export function buildPlan(input: {
     // 附表提到这条责任，或者已经有抽出来的比例，才算这份保单保这一项
     const mentioned = spec.aliases.some((alias) => table.includes(alias));
     if (!row && !mentioned) continue;
+    // 上面已经从库里列过同名责任了，别重复
+    if (benefits.some((item) => normalize(item.name) === normalize(spec.name))) continue;
 
     const tiers = row ? parseTiers(row.tiers) : [];
     const usable = tiers.some((tier) => tier.ratio > 0);
@@ -312,7 +375,7 @@ export function computeEstimate(
   if (input.inWaiting) {
     blockers.push({
       title: "发生在等待期内",
-      detail: "等待期内因疾病发生的治疗，不承担给付责任（意外伤害和续保没有等待期）。",
+      detail: "等待期内因疾病发生的治疗，不承担给付责任；合同对等待期另有约定的，以条款为准。",
       ref: refs.waiting,
     });
   }
@@ -363,6 +426,11 @@ export function computeEstimate(
   }
 
   let payable = gross;
+
+  if (blockers.length === 0 && typeof benefit.cap === "number" && benefit.cap > 0 && payable > benefit.cap) {
+    payable = benefit.cap;
+    notes.push(`这一项责任自己的保额上限是 ${formatMoney(benefit.cap)} 元，本次按保额封顶。`);
+  }
 
   if (blockers.length === 0 && input.annualLimit !== null) {
     const remaining = Math.max(0, round2(input.annualLimit - input.paidThisYear));

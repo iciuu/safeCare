@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { enrichDocument } from "@/lib/ai/enrich";
+import { extractPolicyElements } from "@/lib/ai/extract";
 import { deepseekConfigured } from "@/lib/ai/deepseek";
 import { extractBenefitTable } from "@/lib/benefit-table";
 import { getDb, uploadPathFor } from "@/lib/db";
 import { extractPdf } from "@/lib/pdf";
 import { extractPolicyMeta } from "@/lib/policy-meta";
 import { segmentPolicy } from "@/lib/segmentation";
+import { extractSummaryCoverages } from "@/lib/summary-table";
 import { checkToc, extractTocEntries } from "@/lib/toc";
 
 export const runtime = "nodejs";
@@ -159,6 +160,27 @@ export async function POST(request: Request) {
         );
       }
 
+      // 两页式保单摘要：保障责任明细表里的「责任名 + 保额」用规则先抽一遍，AI 再补比例和说明
+      for (const item of extractSummaryCoverages(extracted.pages)) {
+        insertCoverage.run(
+          policyId,
+          item.name,
+          "fixed",
+          JSON.stringify({
+            hospital_scope: "",
+            tiers: item.ratio && item.ratio > 0 ? [{ when: "标准情形", ratio: item.ratio }] : [],
+            annual_limit: item.amount,
+            annual_limit_unit: "元",
+            deductible: item.deductible,
+            page: item.page,
+            source: "rules",
+          }),
+          attachClause?.id ?? null,
+          0.6,
+          item.ratio ? "ok" : "needs_review",
+        );
+      }
+
       db.prepare(
         "INSERT INTO extraction_run (document_id, stage, engine, status, finished_at) VALUES (?, 'text_extract', 'pdfjs', 'succeeded', datetime('now'))",
       ).run(documentId);
@@ -173,16 +195,16 @@ export async function POST(request: Request) {
       throw cause;
     }
 
-    // AI 增补是「加分项」：失败不影响本次入库，只记一条 extraction_run
-    let ai = { status: "skipped", facts: 0 };
+    // AI 要素抽取是主路径：失败不影响入库（规则结果还在），只记一条 extraction_run
+    let ai = { status: "skipped", elements: 0, coverages: 0 };
     if (deepseekConfigured()) {
       try {
-        const summary = await enrichDocument(documentId);
-        ai = { status: summary.status, facts: summary.facts };
+        const summary = await extractPolicyElements(documentId);
+        ai = { status: summary.status, elements: summary.elements, coverages: summary.coverages };
       } catch (cause) {
-        ai = { status: "failed", facts: 0 };
+        ai = { status: "failed", elements: 0, coverages: 0 };
         db.prepare(
-          "INSERT INTO extraction_run (document_id, stage, engine, status, error, finished_at) VALUES (?, 'ai_enrich', 'deepseek', 'failed', ?, datetime('now'))",
+          "INSERT INTO extraction_run (document_id, stage, engine, status, error, finished_at) VALUES (?, 'ai_extract', 'deepseek', 'failed', ?, datetime('now'))",
         ).run(documentId, cause instanceof Error ? cause.message : String(cause));
       }
     }
@@ -197,7 +219,8 @@ export async function POST(request: Request) {
       toc_missing: toc.missing,
       benefits: benefits.items.length,
       ai: ai.status,
-      ai_facts: ai.facts,
+      ai_elements: ai.elements,
+      ai_coverages: ai.coverages,
     });
   } catch (cause) {
     // 解析失败要清掉占位行，否则 sha256 唯一约束会让用户无法重试

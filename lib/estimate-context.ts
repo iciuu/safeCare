@@ -14,6 +14,9 @@ export const REF_CLAUSES = ["附表1", "2.3", "2.4", "2.5", "2.6", "3.1"] as con
 
 export type EstimateContext = {
   document: { id: number; filename: string };
+  /** 保单上的正式名称，界面上优先显示它而不是文件名 */
+  productName: string | null;
+  insurer: string | null;
   policyId: number | null;
   benefits: EstimateBenefit[];
   notes: string[];
@@ -41,8 +44,12 @@ export function loadEstimateContext(db: DatabaseSync, documentId: number): Estim
   if (!document) return null;
 
   const policyRow = db
-    .prepare("SELECT id, data FROM policy WHERE document_id = ? ORDER BY id DESC LIMIT 1")
-    .get(documentId) as { id: number; data: string } | undefined;
+    .prepare(
+      "SELECT id, insurer, product_name, data FROM policy WHERE document_id = ? ORDER BY id DESC LIMIT 1",
+    )
+    .get(documentId) as
+    | { id: number; insurer: string | null; product_name: string | null; data: string }
+    | undefined;
 
   const policy = policyRow
     ? parseJson<{
@@ -60,11 +67,13 @@ export function loadEstimateContext(db: DatabaseSync, documentId: number): Estim
         const parsed = parseJson<{
           hospital_scope?: string | null;
           tiers?: { when: string; ratio: number }[];
+          annual_limit?: number | null;
         }>(row.data, {});
         return {
           name: row.name,
           hospital_scope: parsed.hospital_scope ?? null,
           tiers: parsed.tiers ?? [],
+          annual_limit: parsed.annual_limit ?? null,
         };
       })
     : [];
@@ -112,6 +121,8 @@ export function loadEstimateContext(db: DatabaseSync, documentId: number): Estim
 
   return {
     document,
+    productName: policyRow?.product_name ?? null,
+    insurer: policyRow?.insurer ?? null,
     policyId: policyRow?.id ?? null,
     benefits: plan.benefits,
     notes: plan.notes,
