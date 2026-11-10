@@ -109,9 +109,14 @@ export default async function PolicyManagementPage({
       <section className="mt-10">
         <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-sm font-semibold text-slate-900">已入库保单</h2>
-          <p className="text-xs text-slate-500">
-            {policies.length} 份 · 共 {totalPages} 页
-            {totalReview > 0 ? ` · ${totalReview} 处待复核` : ""}
+          <p className="flex flex-wrap items-center gap-x-3 text-xs text-slate-500">
+            <span>
+              {policies.length} 份 · 共 {totalPages} 页
+              {totalReview > 0 ? ` · ${totalReview} 处待复核` : ""}
+            </span>
+            <Link href="/stack" className="text-sky-700 underline decoration-dotted underline-offset-2">
+              几张保单一起算
+            </Link>
           </p>
         </div>
 
