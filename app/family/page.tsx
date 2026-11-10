@@ -1,7 +1,16 @@
 import Link from "next/link";
 import { getDb } from "@/lib/db";
 import { formatMoney } from "@/lib/estimate";
-import { expiryLabel, expiryOf, groupByInsured, remindersOf } from "@/lib/family";
+import {
+  activeOnly,
+  archiveOf,
+  expiryLabel,
+  expiryOf,
+  groupByInsured,
+  remindersOf,
+  termKindLabel,
+  termKindOf,
+} from "@/lib/family";
 import { CATEGORY_LABELS, listPolicies } from "@/lib/policy-store";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +23,11 @@ const EXPIRY_STYLE: Record<string, string> = {
 };
 
 export default async function FamilyPage() {
-  const policies = listPolicies(getDb());
+  const all = listPolicies(getDb());
+  // 过期的单独按年份归档：提醒、保费合计、分组都不再算它们
+  const policies = activeOnly(all);
+  const archive = archiveOf(all);
+  const archived = archive.reduce((sum, group) => sum + group.policies.length, 0);
   const members = groupByInsured(policies);
   const { due, unknown } = remindersOf(policies);
 
@@ -31,10 +44,11 @@ export default async function FamilyPage() {
       <header className="mt-4 mb-6">
         <h1 className="text-lg font-semibold tracking-tight">家庭总览</h1>
         <p className="mt-1.5 text-xs leading-6 text-slate-500">
-          {members.length} 位被保险人 · {policies.length} 份保单
+          {members.length} 位被保险人 · 在保 {policies.length} 份
           {totalPremium > 0 ? ` · 已识别保费合计 ${formatMoney(totalPremium)}` : ""}
           {withoutPremium > 0 ? `（另有 ${withoutPremium} 份未识别保费，不计入合计）` : ""}
           {totalReview > 0 ? ` · ${totalReview} 处待复核` : ""}
+          {archived > 0 ? ` · 已过期 ${archived} 份（见文末归档，不参与计算）` : ""}
         </p>
       </header>
 
@@ -42,12 +56,12 @@ export default async function FamilyPage() {
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-sm font-semibold text-slate-900">到期提醒</h2>
           <p className="text-xs text-slate-400">
-            60 天内到期或已经过期 · 期限没识别的 {unknown} 份不算在内
+            60 天内到期 · 期限没识别的 {unknown} 份不算在内 · 已过期的{archived > 0 ? `在文末归档` : "不提醒"}
           </p>
         </div>
 
         {due.length === 0 ? (
-          <p className="mt-2 text-xs text-slate-500">近期没有需要续保的保单。</p>
+          <p className="mt-2 text-xs text-slate-500">近期没有需要续保或期满的保单。</p>
         ) : (
           <ul className="mt-2 space-y-1.5">
             {due.map(({ policy, insured, expiry }) => (
@@ -64,7 +78,12 @@ export default async function FamilyPage() {
                   <span className="mx-1 opacity-50">·</span>
                   {policy.effectiveTo ?? "期限未识别"}
                 </span>
-                <span className="shrink-0 font-medium">{expiryLabel(expiry)}</span>
+                <span className="shrink-0 font-medium">
+                  {expiryLabel(expiry)}
+                  <span className="ml-1 font-normal opacity-70">
+                    {termKindLabel(termKindOf(policy.effectiveFrom, policy.effectiveTo))}
+                  </span>
+                </span>
               </li>
             ))}
           </ul>
@@ -114,6 +133,9 @@ export default async function FamilyPage() {
                         <span className="rounded border border-slate-200 px-1.5 py-0.5 text-[11px] text-slate-600">
                           {CATEGORY_LABELS[policy.category]}
                         </span>
+                        <span className="rounded border border-slate-200 px-1.5 py-0.5 text-[11px] text-slate-500">
+                          {termKindLabel(termKindOf(policy.effectiveFrom, policy.effectiveTo))}
+                        </span>
                         <span>
                           {policy.effectiveFrom ?? "起期未识别"} ~ {policy.effectiveTo ?? "止期未识别"}
                         </span>
@@ -141,8 +163,49 @@ export default async function FamilyPage() {
         </div>
       )}
 
+      {archive.length > 0 ? (
+        <section className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-sm font-semibold text-slate-900">已过期 · 按到期年份归档</h2>
+            <p className="text-xs text-slate-400">{archived} 份 · 不进到期提醒，也不参与叠加计算</p>
+          </div>
+
+          <div className="mt-2 space-y-2">
+            {archive.map((group) => (
+              <details key={group.year} className="rounded-lg border border-slate-200">
+                <summary className="cursor-pointer px-3 py-2 text-xs text-slate-700">
+                  {group.year} 年到期
+                  <span className="ml-2 text-slate-400">{group.policies.length} 份</span>
+                </summary>
+                <ul className="divide-y divide-slate-100 border-t border-slate-100">
+                  {group.policies.map((policy) => (
+                    <li
+                      key={policy.documentId}
+                      className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs"
+                    >
+                      <span className="min-w-0">
+                        <Link href={`/documents/${policy.documentId}`} className="text-slate-700 hover:underline">
+                          {policy.productName ?? policy.filename}
+                        </Link>
+                        <span className="mx-1 text-slate-300">·</span>
+                        {policy.insuredName ?? "未识别被保险人"}
+                      </span>
+                      <span className="flex flex-wrap items-center gap-x-3 text-slate-500">
+                        <span>{termKindLabel(termKindOf(policy.effectiveFrom, policy.effectiveTo))}</span>
+                        <span>{policy.effectiveTo ?? "止期未识别"}</span>
+                        <span>{expiryLabel(expiryOf(policy.effectiveTo))}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       <p className="mt-6 text-xs leading-6 text-slate-400">
-        期限和保费都来自保单原文抽取，识别不出来的显示「未识别」，不会替你猜一个日期。
+        期限和保费都来自保单原文抽取，识别不出来的显示「未识别」，不会替你猜一个日期。过了止期的保单按到期年份归档，不再计入到期提醒、保费合计和叠加计算。
       </p>
     </main>
   );

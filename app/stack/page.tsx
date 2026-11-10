@@ -2,6 +2,7 @@ import Link from "next/link";
 import { getDb } from "@/lib/db";
 import { loadEstimateContext } from "@/lib/estimate-context";
 import { computeEstimate, formatMoney, SCOPE_OPTIONS, toAmount } from "@/lib/estimate";
+import { isExpiredDate } from "@/lib/family";
 import { classifyBenefit, combineStack, fixedHighlights, pickIndemnityBenefit, type StackEntry } from "@/lib/stacking";
 
 export const dynamic = "force-dynamic";
@@ -17,13 +18,17 @@ type PolicyRow = {
   data: string;
 };
 
-function insuredOf(data: string): string | null {
+function policyFieldsOf(data: string): { insured: string | null; effectiveTo: string | null } {
+  let parsed: Record<string, unknown> = {};
   try {
-    const parsed = JSON.parse(data) as { insured_name?: string | null };
-    return parsed.insured_name?.trim() || null;
+    parsed = JSON.parse(data) as Record<string, unknown>;
   } catch {
-    return null;
+    parsed = {};
   }
+  return {
+    insured: typeof parsed.insured_name === "string" ? parsed.insured_name.trim() || null : null,
+    effectiveTo: typeof parsed.effective_to === "string" ? parsed.effective_to : null,
+  };
 }
 
 export default async function StackPage({
@@ -44,11 +49,17 @@ export default async function StackPage({
     )
     .all() as unknown as PolicyRow[];
 
+  // 过期保单不参与叠加：一份已经不保的合同算进来只会把金额抬高
   const byInsured = new Map<string, PolicyRow[]>();
+  let expiredSkipped = 0;
   for (const policy of policies) {
-    const name = insuredOf(policy.data);
-    if (!name) continue;
-    byInsured.set(name, [...(byInsured.get(name) ?? []), policy]);
+    const fields = policyFieldsOf(policy.data);
+    if (!fields.insured) continue;
+    if (isExpiredDate(fields.effectiveTo)) {
+      expiredSkipped += 1;
+      continue;
+    }
+    byInsured.set(fields.insured, [...(byInsured.get(fields.insured) ?? []), policy]);
   }
 
   const names = [...byInsured.keys()].sort((a, b) => a.localeCompare(b, "zh-CN"));
@@ -126,6 +137,15 @@ export default async function StackPage({
           同一个被保险人的多张保单，按同样一笔医疗费用分别算一遍：报销型的加起来不会超过实际自付，定额给付型（重疾、身故、残疾、津贴）通常各自独立。
           分摊顺序、重复保险比例分摊这些规则没建模，结果只作量级参考，不构成理赔结论。
         </p>
+        {expiredSkipped > 0 ? (
+          <p className="mt-2 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600">
+            已跳过 {expiredSkipped} 份已过期保单（不再在保，不算进来）；要改选人请看
+            <Link href="/family" className="mx-1 text-sky-700 underline decoration-dotted underline-offset-2">
+              家庭总览
+            </Link>
+            的归档。
+          </p>
+        ) : null}
       </header>
 
       {names.length === 0 ? (

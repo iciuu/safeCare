@@ -76,9 +76,14 @@ export type HouseholdReminder = {
   policy: ManagedPolicy;
   insured: string;
   expiry: Expiry;
+  term: TermKind;
 };
 
-/** 到期提醒：已过期和 60 天内到期的，按紧急性排；期限没识别的单独统计不混进来。 */
+/**
+ * 到期提醒只算「还没过期、60 天内要处理」的：一年期是续保，长期是期满。
+ * 已经过期的进年份归档（`archiveOf`），不在这里提醒，也不参与后续计算。
+ * 期限没识别的单独计数，不当成快到期。
+ */
 export function remindersOf(
   policies: ManagedPolicy[],
   today: Date = new Date(),
@@ -93,13 +98,76 @@ export function remindersOf(
       unknown += 1;
       continue;
     }
-    if (expiry.status === "expired" || expiry.status === "soon") {
-      due.push({ policy, insured: policy.insuredName?.trim() || "未识别被保险人", expiry });
+    if (expiry.status === "soon") {
+      due.push({
+        policy,
+        insured: policy.insuredName?.trim() || "未识别被保险人",
+        expiry,
+        term: termKindOf(policy.effectiveFrom, policy.effectiveTo),
+      });
     }
   }
 
   due.sort((a, b) => (a.expiry.days ?? 0) - (b.expiry.days ?? 0));
   return { due, unknown };
+}
+
+/**
+ * 期限类型：保障期间一年上下（含续保当年）算一年期，明显更长算长期。
+ * 起期或止期缺一个就返回 unknown——短期医疗险常常只印起期，不能当成长期。
+ */
+export type TermKind = "short" | "long" | "unknown";
+
+/** 一年期保单可能多出几天宽限（如 366 天），留一点余量 */
+export const SHORT_TERM_MAX_DAYS = 400;
+
+export function termKindOf(effectiveFrom: string | null, effectiveTo: string | null): TermKind {
+  const from = daysUntil(effectiveFrom);
+  const to = daysUntil(effectiveTo);
+  if (from === null || to === null) return "unknown";
+  const span = to - from;
+  if (span <= 0) return "unknown";
+  return span <= SHORT_TERM_MAX_DAYS ? "short" : "long";
+}
+
+export function termKindLabel(kind: TermKind): string {
+  return kind === "short" ? "一年期" : kind === "long" ? "长期" : "期限未识别";
+}
+
+/** 过期了就不算在保：叠加、汇总这类计算都用它过滤。 */
+export function isExpiredDate(effectiveTo: string | null, today: Date = new Date()): boolean {
+  return expiryOf(effectiveTo, today).status === "expired";
+}
+
+export function isExpired(policy: ManagedPolicy, today: Date = new Date()): boolean {
+  return isExpiredDate(policy.effectiveTo, today);
+}
+
+export function activeOnly(policies: ManagedPolicy[], today: Date = new Date()): ManagedPolicy[] {
+  return policies.filter((policy) => !isExpired(policy, today));
+}
+
+/** 过期归档：按到期年份分组，新的在前；同一年内按到期日排。 */
+export function archiveOf(
+  policies: ManagedPolicy[],
+  today: Date = new Date(),
+): { year: number; policies: ManagedPolicy[] }[] {
+  const groups = new Map<number, ManagedPolicy[]>();
+
+  for (const policy of policies) {
+    if (!isExpired(policy, today)) continue;
+    const match = /^(\d{4})-/.exec(policy.effectiveTo?.trim() ?? "");
+    if (!match) continue;
+    const year = Number(match[1]);
+    groups.set(year, [...(groups.get(year) ?? []), policy]);
+  }
+
+  return [...groups.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([year, list]) => ({
+      year,
+      policies: [...list].sort((a, b) => (b.effectiveTo ?? "").localeCompare(a.effectiveTo ?? "")),
+    }));
 }
 
 export function expiryLabel(expiry: Expiry): string {

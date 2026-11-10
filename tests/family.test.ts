@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { daysUntil, expiryLabel, expiryOf, groupByInsured, remindersOf } from "../lib/family";
+import {
+  activeOnly,
+  archiveOf,
+  daysUntil,
+  expiryLabel,
+  expiryOf,
+  groupByInsured,
+  isExpired,
+  remindersOf,
+  termKindLabel,
+  termKindOf,
+} from "../lib/family";
 import type { ManagedPolicy } from "../lib/policy-store";
 
 const today = new Date(2026, 10, 10); // 2026-11-10
@@ -70,7 +81,7 @@ test("家庭：按被保险人分组，保额/保费/待复核各自汇总", () 
   assert.equal(members[0].name, "牛秋绥");
 });
 
-test("家庭：到期提醒只列已过期和 60 天内的，期限未识别的单独计数", () => {
+test("家庭：到期提醒只列还没过期、60 天内的，期限未识别的单独计数", () => {
   const { due, unknown } = remindersOf(
     [
       policy({ documentId: 23, effectiveTo: "2026-11-11" }),
@@ -80,8 +91,57 @@ test("家庭：到期提醒只列已过期和 60 天内的，期限未识别的�
     ],
     today,
   );
-  assert.deepEqual(due.map((item) => item.policy.documentId), [40, 23]);
+  // 已过期的 40 不在提醒里，去归档
+  assert.deepEqual(due.map((item) => item.policy.documentId), [23]);
   assert.equal(unknown, 1);
+});
+
+test("期限：一年上下算一年期，明显更长算长期，缺日期不猜", () => {
+  assert.equal(termKindOf("2025-11-12", "2026-11-11"), "short");
+  assert.equal(termKindOf("2026-01-16", "2056-01-15"), "long");
+  assert.equal(termKindOf("2026-11-08", null), "unknown");
+  assert.equal(termKindOf(null, null), "unknown");
+  assert.equal(termKindLabel("short"), "一年期");
+  assert.equal(termKindLabel("long"), "长期");
+  assert.equal(termKindLabel("unknown"), "期限未识别");
+});
+
+test("过期：过了止期算过期，没止期的不算", () => {
+  assert.equal(isExpired(policy({ effectiveTo: "2026-09-01" }), today), true);
+  assert.equal(isExpired(policy({ effectiveTo: "2026-11-11" }), today), false);
+  assert.equal(isExpired(policy({ effectiveTo: null }), today), false);
+});
+
+test("过期：按到期年份归档，新的在前，未过期的不进归档", () => {
+  const archive = archiveOf(
+    [
+      policy({ documentId: 40, effectiveTo: "2026-09-01" }),
+      policy({ documentId: 41, effectiveTo: "2025-03-02" }),
+      policy({ documentId: 42, effectiveTo: "2026-06-15" }),
+      policy({ documentId: 23, effectiveTo: "2026-11-11" }),
+      policy({ documentId: 18, effectiveTo: null }),
+    ],
+    today,
+  );
+  assert.deepEqual(
+    archive.map((group) => [group.year, group.policies.map((item) => item.documentId)]),
+    [
+      [2026, [40, 42]],
+      [2025, [41]],
+    ],
+  );
+});
+
+test("计算口径：只留在保的保单", () => {
+  const active = activeOnly(
+    [
+      policy({ documentId: 23, effectiveTo: "2026-11-11" }),
+      policy({ documentId: 40, effectiveTo: "2026-09-01" }),
+      policy({ documentId: 18, effectiveTo: null }),
+    ],
+    today,
+  );
+  assert.deepEqual(active.map((item) => item.documentId), [23, 18]);
 });
 
 test("家庭：没有任何期限信息时不报警", () => {
