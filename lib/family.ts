@@ -44,11 +44,31 @@ export function expiryOf(effectiveTo: string | null, today: Date = new Date(), s
   return { status: "ok", days };
 }
 
+/**
+ * 一张保单可能有多个被保险人（夫妻互保的定期寿险、家庭单等），
+ * 原文里通常写成「牛广、严梦婷」，这里统一拆成名字数组。
+ */
+export function insuredNamesOf(policy: { insuredName: string | null }): string[] {
+  const raw = policy.insuredName?.trim();
+  if (!raw) return [];
+  return raw
+    .split(/[\u3001,\uFF0C/\uFF1B;\u3001]|\u548C|\u53CA/)
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+/** 两人共同被保的保单：在每个人名下都列一次，但保费不重复计 */
+export function isSharedPolicy(policy: { insuredName: string | null }): boolean {
+  return insuredNamesOf(policy).length > 1;
+}
+
 export type HouseholdMember = {
   name: string;
   policies: ManagedPolicy[];
   premium: number;
   needsReview: number;
+  /** 与他人共有的保单份数（保费不计入上面的 premium） */
+  shared: number;
   /** 最近一个到期日（不含已过期），用来排先后 */
   nextExpiry: number | null;
 };
@@ -56,8 +76,10 @@ export type HouseholdMember = {
 export function groupByInsured(policies: ManagedPolicy[]): HouseholdMember[] {
   const groups = new Map<string, ManagedPolicy[]>();
   for (const policy of policies) {
-    const name = policy.insuredName?.trim() || "未识别被保险人";
-    groups.set(name, [...(groups.get(name) ?? []), policy]);
+    const names = insuredNamesOf(policy);
+    for (const name of names.length > 0 ? names : ["未识别被保险人"]) {
+      groups.set(name, [...(groups.get(name) ?? []), policy]);
+    }
   }
 
   return [...groups.entries()]
@@ -65,11 +87,14 @@ export function groupByInsured(policies: ManagedPolicy[]): HouseholdMember[] {
       const days = list
         .map((policy) => daysUntil(policy.effectiveTo))
         .filter((value): value is number => value !== null && value >= 0);
+      const own = list.filter((policy) => !isSharedPolicy(policy));
       return {
         name,
         policies: list,
-        premium: list.reduce((sum, policy) => sum + (policy.premium ?? 0), 0),
+        // 共享保单的保费只在共享人之间算一次，不重复计入每个人的合计
+        premium: own.reduce((sum, policy) => sum + (policy.premium ?? 0), 0),
         needsReview: list.reduce((sum, policy) => sum + policy.needsReview, 0),
+        shared: list.length - own.length,
         nextExpiry: days.length > 0 ? Math.min(...days) : null,
       };
     })

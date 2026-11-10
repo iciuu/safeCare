@@ -431,7 +431,11 @@ export default async function DocumentPage({
           label: "保险费",
           value: policy.premium === null ? null : `${policy.premium.toLocaleString("zh-CN")} 元`,
         },
-        { label: "等待期", value: policy.waiting_days === null ? null : `${policy.waiting_days} 日` },
+        {
+          label: "等待期",
+          // 0 天就是没有等待期，写成「0 日」容易让人以为还要等
+          value: policy.waiting_days === null ? null : policy.waiting_days === 0 ? "无" : `${policy.waiting_days} 日`,
+        },
         {
           label: "犹豫期",
           value: policy.hesitation_days === null ? null : `${policy.hesitation_days} 日`,

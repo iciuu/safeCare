@@ -7,8 +7,10 @@ import {
   expiryLabel,
   expiryOf,
   groupByInsured,
+  insuredNamesOf,
   isExpired,
   isIsoDate,
+  isSharedPolicy,
   remindersOf,
   termKindLabel,
   termKindOf,
@@ -157,4 +159,30 @@ test("日期校验：只认 YYYY-MM-DD 且真实的日期", () => {
   assert.equal(isIsoDate("2026/05/31"), false);
   assert.equal(isIsoDate("2026-5-1"), false);
   assert.equal(isIsoDate(""), false);
+});
+
+test("多个被保险人：一张夫妻互保保单在两个人名下都出现，保费只算一次", () => {
+  const shared = policy({ documentId: 28, insuredName: "牛广、严梦婷", premium: 1630, effectiveTo: "2051-08-31" });
+  const own = policy({ documentId: 27, insuredName: "牛广", premium: 5000, effectiveTo: "2060-01-01" });
+
+  const members = groupByInsured([shared, own]);
+  const niu = members.find((member) => member.name === "牛广");
+  const yan = members.find((member) => member.name === "严梦婷");
+
+  assert.deepEqual(members.map((member) => member.name).sort(), ["严梦婷", "牛广"]);
+  assert.equal(niu?.policies.length, 2);
+  assert.equal(niu?.premium, 5000);
+  assert.equal(niu?.shared, 1);
+  assert.equal(yan?.policies.length, 1);
+  assert.equal(yan?.premium, 0);
+  assert.equal(yan?.shared, 1);
+});
+
+test("多个被保险人：拆名字、判定共同被保", () => {
+  assert.deepEqual(insuredNamesOf({ insuredName: "牛广、严梦婷" }), ["牛广", "严梦婷"]);
+  assert.deepEqual(insuredNamesOf({ insuredName: "牛广, 严梦婷" }), ["牛广", "严梦婷"]);
+  assert.deepEqual(insuredNamesOf({ insuredName: "牛秋绥" }), ["牛秋绥"]);
+  assert.deepEqual(insuredNamesOf({ insuredName: null }), []);
+  assert.equal(isSharedPolicy({ insuredName: "牛广、严梦婷" }), true);
+  assert.equal(isSharedPolicy({ insuredName: "牛秋绥" }), false);
 });

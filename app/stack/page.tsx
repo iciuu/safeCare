@@ -2,7 +2,7 @@ import Link from "next/link";
 import { getDb } from "@/lib/db";
 import { loadEstimateContext } from "@/lib/estimate-context";
 import { computeEstimate, formatMoney, SCOPE_OPTIONS, toAmount } from "@/lib/estimate";
-import { isExpiredDate } from "@/lib/family";
+import { insuredNamesOf, isExpiredDate } from "@/lib/family";
 import { classifyBenefit, combineStack, fixedHighlights, pickIndemnityBenefit, type StackEntry } from "@/lib/stacking";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +18,7 @@ type PolicyRow = {
   data: string;
 };
 
-function policyFieldsOf(data: string): { insured: string | null; effectiveTo: string | null } {
+function policyFieldsOf(data: string): { insured: string[]; effectiveTo: string | null } {
   let parsed: Record<string, unknown> = {};
   try {
     parsed = JSON.parse(data) as Record<string, unknown>;
@@ -26,7 +26,7 @@ function policyFieldsOf(data: string): { insured: string | null; effectiveTo: st
     parsed = {};
   }
   return {
-    insured: typeof parsed.insured_name === "string" ? parsed.insured_name.trim() || null : null,
+    insured: insuredNamesOf({ insuredName: typeof parsed.insured_name === "string" ? parsed.insured_name : null }),
     effectiveTo: typeof parsed.effective_to === "string" ? parsed.effective_to : null,
   };
 }
@@ -54,12 +54,15 @@ export default async function StackPage({
   let expiredSkipped = 0;
   for (const policy of policies) {
     const fields = policyFieldsOf(policy.data);
-    if (!fields.insured) continue;
+    if (fields.insured.length === 0) continue;
     if (isExpiredDate(fields.effectiveTo)) {
       expiredSkipped += 1;
       continue;
     }
-    byInsured.set(fields.insured, [...(byInsured.get(fields.insured) ?? []), policy]);
+    // 夫妻互保的保单在两个被保人名下都算一份（每人都有独立的保额）
+    for (const name of fields.insured) {
+      byInsured.set(name, [...(byInsured.get(name) ?? []), policy]);
+    }
   }
 
   const names = [...byInsured.keys()].sort((a, b) => a.localeCompare(b, "zh-CN"));

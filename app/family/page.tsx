@@ -7,6 +7,8 @@ import {
   expiryLabel,
   expiryOf,
   groupByInsured,
+  insuredNamesOf,
+  isSharedPolicy,
   remindersOf,
   termKindLabel,
   termKindOf,
@@ -189,6 +191,7 @@ export default async function FamilyPage({
                 </h2>
                 <p className="flex flex-wrap items-center gap-x-3 text-xs text-slate-400">
                   {member.premium > 0 ? <span>保费 {formatMoney(member.premium)}</span> : null}
+                  {member.shared > 0 ? <span>另有 {member.shared} 份共同被保（保费已计入对方）</span> : null}
                   {member.needsReview > 0 ? <span className="text-amber-700">{member.needsReview} 处待复核</span> : null}
                   <Link
                     href={`/stack?name=${encodeURIComponent(member.name)}`}
@@ -217,6 +220,14 @@ export default async function FamilyPage({
                         <span className="rounded border border-slate-200 px-1.5 py-0.5 text-[11px] text-slate-600">
                           {CATEGORY_LABELS[policy.category]}
                         </span>
+                        {isSharedPolicy(policy) ? (
+                          <span
+                            className="rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-700"
+                            title={`这张保单同时以 ${insuredNamesOf(policy).join("、")} 为被保险人`}
+                          >
+                            共同被保 · {insuredNamesOf(policy).join("、")}
+                          </span>
+                        ) : null}
                         <span className="rounded border border-slate-200 px-1.5 py-0.5 text-[11px] text-slate-500">
                           {termKindLabel(termKindOf(policy.effectiveFrom, policy.effectiveTo))}
                         </span>

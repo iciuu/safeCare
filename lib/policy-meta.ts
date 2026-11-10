@@ -118,15 +118,27 @@ export function extractPolicyMeta(pages: PageText[]): PolicyMeta {
 
   // 日期在保单摘要里常被表格拆行：「2025年11月12日00时00分00秒 起」/「2026年11月11日24时00分00秒 止」
   const flat = lines.map((line) => line.text).join("\n");
+  // 止期只从「保险期间」那种短行取：长句里的「…日…止」多半是公告、活动、附加条款的期限，
+  // 把全文第一个「日…止」当保单止期，华贵那类保单会被认成 2021-12-31。
   const fromFlat = flat.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日[^\n]{0,14}?起/);
-  const toFlat = flat.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日[^\n]{0,20}?止/);
+  const termLines = lines.filter(
+    (line) =>
+      !/公告|扩展|活动|赠送|声明/.test(line.text) &&
+      (/保险期间|保障期间|合同期间/.test(line.text) ||
+        (line.text.length <= 24 && /^\s*至/.test(line.text))),
+  );
+  const toFlat = termLines
+    .map((line) => line.text.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日[^\n]{0,20}?止/))
+    .find((match) => match !== null) ?? null;
 
   const effectiveFrom =
     findDate(lines, /合同生效日期[：:]\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/) ??
     (fromFlat ? isoDate(fromFlat[1], fromFlat[2], fromFlat[3]) : null);
   const effectiveTo =
-    findDate(lines, /至\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*零?时?止/) ??
-    (toFlat ? isoDate(toFlat[1], toFlat[2], toFlat[3]) : null);
+    findDate(
+      termLines,
+      /至\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*零?时?止/,
+    ) ?? (toFlat ? isoDate(toFlat[1], toFlat[2], toFlat[3]) : null);
 
   const premium = findNumber(lines, /保险费合计[：:][^\n]*?(?:RMB|￥|¥)\s*([\d,]+(?:\.\d+)?)/);
   const hesitation = findNumber(lines, /(\d{1,3})\s*(?:日|天)(?:（[^）]*）)?(?:的)?犹豫期/);

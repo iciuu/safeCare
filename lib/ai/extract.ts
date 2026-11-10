@@ -35,7 +35,8 @@ import { normalizeForQuote, quoteMatches } from "./enrich";
  * 提示词版本：改了 systemPrompt 的结构或字段约束就要跟着改，
  * 记进 extraction_run，重跑后才能回答「这次少了几条是不是提示词改坏了」。
  */
-export const PROMPT_VERSION = "extract-v1";
+// v2：多人被保险人写成「牛广、严梦婷」，并按「保险期间 N 年」推算止期
+export const PROMPT_VERSION = "extract-v2";
 
 const MAX_BATCH_CHARS = 9000;
 const MAX_BATCHES = 14;
@@ -128,6 +129,9 @@ function systemPrompt(): string {
     '"terms":[{"label":"年度给付限额","value":"400","unit":"万元","condition":"","quote":"","page":5,"clause_no":"2.5"}]}',
     "",
     "policy 只在这一页确实印着投保单信息时才填，没印就整个字段给 null 或空字符串。",
+    "被保险人有两个时（夫妻互保、家庭单），insured_name 用「、」连起来，如「牛广、严梦婷」；不要只写投保人或第一被保险人。",
+    "保险期间只写「30年」「至70周岁」这类相对表述时，用合同生效日期加 30 年减一天算出 effective_to（如 2021-09-01 起、30 年 → 2051-08-31）；算不出来就给空。",
+    "effective_to 只能是合同「保险期间届满」那一天；不要拿产品公告到期日、现金价值表年份、交费期当成保单止期，拿不准就给空。",
     "coverages 是「保险责任」段落里的给付项目，每项一条；没有分级比例的 tiers 给空数组。",
     "如果某页是「保障责任明细 / 保额」表格（短期意外险的保单摘要），表里每一行责任都要单独作为一条 coverage：annual_limit 填该行保额，表里有免赔额/赔付比例就把比例写进 tiers（无分档时 tiers=[{when:\"标准情形\",ratio:赔付比例}]）。",
     "tiers 的 when 用不超过 20 字的条件短语（如「未以社保身份就诊」），不要把整句原文抄进去。",
@@ -450,13 +454,40 @@ function readPolicy(raw: RawPolicy | undefined, pages: PageInput[], restore: (in
   const productName = pickText("product_name", 80);
   const insurer = pickText("insurer", 60);
 
+  const holderName = pickText("holder_name", 30);
+
+  // 「牛广、严梦婷」这种多人写法整串在原文里找不到，要逐个人名校验后再拼回去
+  const insuredNames = (value: string | null): string | null => {
+    if (!value) return null;
+    const names = value
+      .split(/[\u3001,\uFF0C\/\uFF1B;\u3001]|\u548C|\u53CA/)
+      .map((name) => name.trim())
+      .filter((name) => name.length >= 2 && name.length <= 12);
+    const verified = names.filter((name) => joined.includes(normalizeForQuote(restoreText(name, restore)).slice(0, 40)));
+    return verified.length > 0 ? verified.join("\u3001") : null;
+  };
+
+  // 夫妻互保的定期寿险（华贵大麦甜蜜家这类）合同写明「投保人为第一被保险人」，
+  // 保单页的「被保人」栏只印第二个人，不把投保人补回来就会漏掉一个人。
+  const mutualCover = /第一被保险人与第二被保险人|投保人为第一被保险人|夫妻双方均可|两人均作为被保险人/.test(
+    joined,
+  );
+  const insuredFinal = (value: string | null): string | null => {
+    const names = insuredNames(value);
+    if (!mutualCover || !holderName) return names;
+    const holder = restoreText(holderName, restore);
+    if (!joined.includes(normalizeForQuote(holder))) return names;
+    if (names?.split("\u3001").includes(holder)) return names;
+    return names ? `${holder}\u3001${names}` : holder;
+  };
+
   return {
     insurer,
     product_name: productName,
     policy_no: pickText("policy_no", 40),
     category: normalizePolicyCategory(textOf(raw.category, 30) || null, [productName ?? "", insurer ?? ""]),
-    holder_name: pickText("holder_name", 30),
-    insured_name: pickText("insured_name", 30),
+    holder_name: holderName,
+    insured_name: insuredFinal(pickText("insured_name", 60)),
     effective_from: normalizeDate(pickText("effective_from", 20)),
     effective_to: normalizeDate(pickText("effective_to", 20)),
     premium: numberOf(raw.premium),
@@ -534,6 +565,40 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+/**
+ * 止期推导：data.effective_from + 「保险期间 N 年」- 1 天。
+ * 只认按年写的期间（“保至 70 周岁”要生日才能算，不在这儿碰），已有止期就不动。
+ */
+export function expiryFromTerm(
+  data: Record<string, unknown>,
+  rows: { kind: string; label: string; value: string; unit: string }[],
+): string | null {
+  const from = typeof data.effective_from === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(data.effective_from.trim()) : null;
+  if (!from) return null;
+
+  const term = rows.find(
+    (row) => row.kind === "term" && /保险期间|保障期间/.test(row.label) && row.unit.trim() === "年",
+  );
+  if (!term) return null;
+  const years = Number(term.value.replace(/[^\d.]/g, ""));
+  if (!Number.isFinite(years) || years <= 0 || years > 100) return null;
+
+  // 合同写「保险期间 30 年」，止期就是第 30 年的对应日的前一天
+  const start = new Date(Date.UTC(Number(from[1]), Number(from[2]) - 1, Number(from[3])));
+  const end = new Date(Date.UTC(Number(from[1]) + years, Number(from[2]) - 1, Number(from[3])));
+  end.setUTCDate(end.getUTCDate() - 1);
+  if (end.getTime() <= start.getTime()) return null;
+
+  // 已经有一个差得很远的止期（比如把公告到期日当成了保单止期），以合同上的保险期间为准
+  const current = typeof data.effective_to === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(data.effective_to.trim()) : null;
+  if (current) {
+    const given = Date.UTC(Number(current[1]), Number(current[2]) - 1, Number(current[3]));
+    if (Math.abs(given - end.getTime()) <= 60 * 86400000) return null;
+  }
+
+  return end.toISOString().slice(0, 10);
+}
+
 function persist(
   db: DatabaseSync,
   documentId: number,
@@ -608,6 +673,11 @@ function persist(
     if (value === null || value === undefined || value === "") continue;
     data[key] = value;
   }
+
+  // 很多保单只写「保险期间：30 年」不写止期；起期是确定的，就起期 + 30 年 - 1 天，
+  // 这和合同「保险期间届满日」的算法一致，不是猜出来的日期。
+  const derivedTo = expiryFromTerm(data, rows);
+  if (derivedTo) data.effective_to = derivedTo;
 
   const limits = finalCoverages
     .map((item) => item.annualLimit)
