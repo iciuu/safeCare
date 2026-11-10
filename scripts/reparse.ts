@@ -107,6 +107,8 @@ async function main(): Promise<void> {
       }
       for (const [key, value] of Object.entries(meta)) {
         if (value === null || value === undefined || value === "") continue;
+        // 规则层认不出险种时保留原值（可能是 AI 认的或手工改的）
+        if (key === "category" && value === "unknown") continue;
         data[key] = value;
       }
       const table = (data.benefit_table as Record<string, unknown> | undefined) ?? {};
