@@ -27,6 +27,7 @@ const ERROR_TEXT: Record<string, string> = {
   bad_document: "参数不对，操作没有执行。",
   not_found: "这份保单已经不在库里了。",
   no_api_key: "没有配置 DEEPSEEK_API_KEY，没法重跑 AI 提要点。",
+  bad_date: "日期要写成 2026-05-31 这样的格式，且必须是真实存在的日期；没有保存。",
 };
 
 const AI_STATUS_TEXT: Record<string, string> = {

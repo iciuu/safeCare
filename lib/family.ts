@@ -16,6 +16,15 @@ export const SOON_DAYS = 60;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** 只收 YYYY-MM-DD，且必须是真实存在的日期（2026-02-31 不算）。 */
+export function isIsoDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) return false;
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
 /** 只比日期，不看时分秒：用 UTC 0 点相减，避免时区把一天算成 23 小时 */
 export function daysUntil(date: string | null, today: Date = new Date()): number | null {
   if (!date) return null;
@@ -175,6 +184,8 @@ export function expiryLabel(expiry: Expiry): string {
   if (expiry.days < 0) return `已过期 ${Math.abs(expiry.days)} 天`;
   if (expiry.days === 0) return "今天到期";
   // 长期重疾险剩十几年，写「10658 天后到期」没人看得懂
+  // 上百年基本是「长期有效」，写「973 年后到期」没意义
+  if (expiry.days > 365 * 100) return "长期有效";
   if (expiry.days > 730) return `${Math.round(expiry.days / 365)} 年后到期`;
   return `${expiry.days} 天后到期`;
 }

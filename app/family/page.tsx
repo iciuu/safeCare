@@ -12,6 +12,7 @@ import {
   termKindOf,
 } from "@/lib/family";
 import { CATEGORY_LABELS, listPolicies } from "@/lib/policy-store";
+import { setExpiryAction } from "@/app/policy-actions";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +23,18 @@ const EXPIRY_STYLE: Record<string, string> = {
   unknown: "border-slate-200 bg-white text-slate-400",
 };
 
-export default async function FamilyPage() {
+const EXPIRY_ERROR_TEXT: Record<string, string> = {
+  bad_date: "日期要写成 2026-05-31 这样的格式，且必须是真实存在的日期。",
+  bad_policy: "参数不对，没有保存。",
+  not_found: "这份保单已经不在库里了。",
+};
+
+export default async function FamilyPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const query = await searchParams;
   const all = listPolicies(getDb());
   // 过期的单独按年份归档：提醒、保费合计、分组都不再算它们
   const policies = activeOnly(all);
@@ -30,6 +42,18 @@ export default async function FamilyPage() {
   const archived = archive.reduce((sum, group) => sum + group.policies.length, 0);
   const members = groupByInsured(policies);
   const { due, unknown } = remindersOf(policies);
+  // 抽不到止期的保单：提醒、归档都靠日期，这里直接让人补一个
+  const missingExpiry = policies.filter((policy) => !policy.effectiveTo);
+
+  const flash =
+    typeof query.expiry_error === "string"
+      ? { kind: "error" as const, text: EXPIRY_ERROR_TEXT[query.expiry_error] ?? "没有保存。" }
+      : typeof query.expiry_saved === "string"
+        ? { kind: "ok" as const, text: "到期日已保存，提醒和归档已按新日期重算。" }
+        : null;
+
+  const dateField =
+    "mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-900 outline-none focus:border-sky-500";
 
   const totalPremium = policies.reduce((sum, policy) => sum + (policy.premium ?? 0), 0);
   const totalReview = policies.reduce((sum, policy) => sum + policy.needsReview, 0);
@@ -51,6 +75,66 @@ export default async function FamilyPage() {
           {archived > 0 ? ` · 已过期 ${archived} 份（见文末归档，不参与计算）` : ""}
         </p>
       </header>
+
+      {flash ? (
+        <p
+          className={`mb-4 rounded-lg px-3 py-2 text-xs ${
+            flash.kind === "error" ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700"
+          }`}
+        >
+          {flash.text}
+        </p>
+      ) : null}
+
+      {missingExpiry.length > 0 ? (
+        <section className="mb-6 rounded-xl border border-amber-200 bg-amber-50/40 p-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-sm font-semibold text-slate-900">待补到期日 · {missingExpiry.length} 份</h2>
+            <p className="text-xs text-slate-500">合同原文没写清止期，填上后才会进到期提醒和归档</p>
+          </div>
+          <div className="mt-2 space-y-2">
+            {missingExpiry.map((policy) => (
+              <form
+                key={policy.documentId}
+                action={setExpiryAction}
+                className="flex flex-wrap items-end gap-2 rounded-lg border border-amber-200 bg-white px-3 py-2"
+              >
+                <input type="hidden" name="policyId" value={policy.policyId ?? ""} />
+                <input type="hidden" name="documentId" value={policy.documentId} />
+                <div className="min-w-0 flex-1 text-xs text-slate-700">
+                  <Link href={`/documents/${policy.documentId}`} className="hover:underline">
+                    {policy.productName ?? policy.filename}
+                  </Link>
+                  <p className="text-[11px] text-slate-400">
+                    {policy.insuredName ?? "未识别被保险人"} · 起期 {policy.effectiveFrom ?? "未识别"}
+                  </p>
+                </div>
+                <label className="w-32 text-[11px] text-slate-500">
+                  起期（可选）
+                  <input
+                    name="effectiveFrom"
+                    defaultValue={policy.effectiveFrom ?? ""}
+                    placeholder="2025-06-01"
+                    inputMode="numeric"
+                    className={dateField}
+                  />
+                </label>
+                <label className="w-32 text-[11px] text-slate-500">
+                  到期日
+                  <input name="effectiveTo" placeholder="2026-05-31" inputMode="numeric" className={dateField} />
+                </label>
+                <button
+                  type="submit"
+                  disabled={policy.policyId === null}
+                  className="rounded-md bg-slate-900 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-40"
+                >
+                  保存
+                </button>
+              </form>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
         <div className="flex flex-wrap items-baseline justify-between gap-2">

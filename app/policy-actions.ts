@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { deepseekConfigured } from "@/lib/ai/deepseek";
 import { getDb } from "@/lib/db";
 import { startExtraction } from "@/lib/extract-job";
+import { isIsoDate } from "@/lib/family";
 import {
   deletePolicyDocument,
   isCategory,
@@ -21,12 +22,52 @@ function text(form: FormData, name: string): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
+/**
+ * 只补期限：抽不到到期日的保单，在家庭总览里直接填，不必展开首页的大表单。
+ * 空值表示改回「未识别」；日期必须是 YYYY-MM-DD，写错就退回原页面带上错误提示。
+ */
+export async function setExpiryAction(form: FormData): Promise<void> {
+  const policyId = Number(form.get("policyId"));
+  if (!Number.isInteger(policyId) || policyId <= 0) redirect("/family?expiry_error=bad_policy");
+
+  const rawFrom = text(form, "effectiveFrom") ?? "";
+  const rawTo = text(form, "effectiveTo") ?? "";
+  for (const value of [rawFrom, rawTo]) {
+    if (value !== "" && !isIsoDate(value)) redirect("/family?expiry_error=bad_date");
+  }
+
+  const db = getDb();
+  const row = db.prepare("SELECT data FROM policy WHERE id = ?").get(policyId) as { data: string } | undefined;
+  if (!row) redirect("/family?expiry_error=not_found");
+
+  let data: Record<string, unknown> = {};
+  try {
+    data = JSON.parse(row.data) as Record<string, unknown>;
+  } catch {
+    data = {};
+  }
+  data.effective_from = rawFrom === "" ? null : rawFrom;
+  data.effective_to = rawTo === "" ? null : rawTo;
+
+  db.prepare("UPDATE policy SET data = ? WHERE id = ?").run(JSON.stringify(data), policyId);
+
+  revalidatePath("/");
+  revalidatePath("/family");
+  revalidatePath(`/documents/${form.get("documentId") ?? ""}`);
+  redirect(`/family?expiry_saved=${policyId}`);
+}
+
 export async function savePolicyAction(form: FormData): Promise<void> {
   const policyId = Number(form.get("policyId"));
   if (!Number.isInteger(policyId) || policyId <= 0) redirect("/?error=bad_policy");
 
   const category = text(form, "category") ?? "unknown";
   if (!isCategory(category)) redirect("/?error=bad_category");
+
+  for (const name of ["effectiveFrom", "effectiveTo"]) {
+    const value = text(form, name);
+    if (value !== null && !isIsoDate(value)) redirect("/?error=bad_date");
+  }
 
   const patch: PolicyPatch = {
     category,

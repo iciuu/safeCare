@@ -8,6 +8,7 @@ import {
   expiryOf,
   groupByInsured,
   isExpired,
+  isIsoDate,
   remindersOf,
   termKindLabel,
   termKindOf,
@@ -146,4 +147,14 @@ test("计算口径：只留在保的保单", () => {
 
 test("家庭：没有任何期限信息时不报警", () => {
   assert.deepEqual(remindersOf([policy({ effectiveTo: null })], today), { due: [], unknown: 1 });
+});
+
+test("日期校验：只认 YYYY-MM-DD 且真实的日期", () => {
+  assert.equal(isIsoDate("2026-05-31"), true);
+  assert.equal(isIsoDate("2024-02-29"), true);
+  assert.equal(isIsoDate("2026-02-31"), false);
+  assert.equal(isIsoDate("2026-13-01"), false);
+  assert.equal(isIsoDate("2026/05/31"), false);
+  assert.equal(isIsoDate("2026-5-1"), false);
+  assert.equal(isIsoDate(""), false);
 });
