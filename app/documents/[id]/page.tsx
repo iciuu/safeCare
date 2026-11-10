@@ -490,17 +490,25 @@ export default async function DocumentPage({
               填费用、社保已报金额、就诊范围，按条款逐段算出预估可赔金额，每步都能点回原文。
             </p>
           </div>
-          <Link
-            href={`/documents/${documentId}/estimate`}
-            className="shrink-0 rounded-md bg-sky-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-800"
-          >
-            估算能赔多少 →
-          </Link>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <Link
+              href={`/documents/${documentId}/estimate`}
+              className="rounded-md bg-sky-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-800"
+            >
+              估算能赔多少 →
+            </Link>
+            <Link
+              href={`/documents/${documentId}/claim`}
+              className="rounded-md border border-sky-700 px-3 py-1.5 text-xs font-medium text-sky-800 hover:bg-sky-100"
+            >
+              出事了怎么报 →
+            </Link>
+          </div>
         </div>
       </section>
 
       {flatFacts.length > 0 || elementRows.length > 0 ? (
-        <section className="mb-8">
+        <section id="quick" className="mb-8">
           <div className="mb-2 flex items-baseline justify-between gap-3">
             <h2 className="text-sm font-semibold text-slate-900">速查卡</h2>
             <p className="text-xs text-slate-500">点 P 页码跳到原文那一页并高亮引文</p>

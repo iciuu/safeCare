@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/segmentation.test.ts tests/policy-meta.test.ts tests/toc.test.ts tests/benefit-table.test.ts tests/redact.test.ts tests/enrich.test.ts tests/estimate.test.ts tests/claim.test.ts tests/policy-store.test.ts tests/elements.test.ts tests/summary-table.test.ts",
+    "test": "tsx --test tests/segmentation.test.ts tests/policy-meta.test.ts tests/toc.test.ts tests/benefit-table.test.ts tests/redact.test.ts tests/enrich.test.ts tests/estimate.test.ts tests/claim.test.ts tests/policy-store.test.ts tests/elements.test.ts tests/summary-table.test.ts tests/claim-guide.test.ts",
     "sample": "node scripts/make-sample.mjs",
     "eval": "node --import tsx scripts/eval.ts",
     "backup": "node scripts/backup.mjs"
