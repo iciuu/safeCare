@@ -47,6 +47,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       exclusionIndex === null ? null : (context.exclusions[exclusionIndex]?.text ?? null),
     paidThisYear: num(body.paid),
     annualLimit: context.annualLimit,
+    subLimits: Array.isArray(body.subLimits)
+      ? body.subLimits
+          .filter((item) => item && typeof item.label === "string")
+          .map((item) => ({ label: item.label, limit: num(item.limit), amount: num(item.amount) }))
+      : [],
+    flatRatio: typeof body.flatRatio === "number" && Number.isFinite(body.flatRatio) ? body.flatRatio : null,
   };
 
   if (!deepseekConfigured()) {

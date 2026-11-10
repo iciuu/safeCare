@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { extractPolicyElements } from "@/lib/ai/extract";
 import { deepseekConfigured } from "@/lib/ai/deepseek";
+import { startExtraction } from "@/lib/extract-job";
 import { extractBenefitTable } from "@/lib/benefit-table";
 import { getDb, uploadPathFor } from "@/lib/db";
 import { extractPdf } from "@/lib/pdf";
@@ -195,19 +195,11 @@ export async function POST(request: Request) {
       throw cause;
     }
 
-    // AI 要素抽取是主路径：失败不影响入库（规则结果还在），只记一条 extraction_run
-    let ai = { status: "skipped", elements: 0, coverages: 0 };
-    if (deepseekConfigured()) {
-      try {
-        const summary = await extractPolicyElements(documentId);
-        ai = { status: summary.status, elements: summary.elements, coverages: summary.coverages };
-      } catch (cause) {
-        ai = { status: "failed", elements: 0, coverages: 0 };
-        db.prepare(
-          "INSERT INTO extraction_run (document_id, stage, engine, status, error, finished_at) VALUES (?, 'ai_extract', 'deepseek', 'failed', ?, datetime('now'))",
-        ).run(documentId, cause instanceof Error ? cause.message : String(cause));
-      }
-    }
+    // AI 要素抽取放到后台跑：等它跑完再返回，浏览器只能干晒着，断掉就白花一次 token。
+    // 详情页轮询 /api/documents/[id]/extract 看进度，中断了可以接着抽。
+    const ai = deepseekConfigured()
+      ? { status: startExtraction(documentId) ? "started" : "running", elements: 0, coverages: 0 }
+      : { status: "skipped", elements: 0, coverages: 0 };
 
     return NextResponse.json({
       id: documentId,

@@ -2,9 +2,9 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { extractPolicyElements } from "@/lib/ai/extract";
 import { deepseekConfigured } from "@/lib/ai/deepseek";
 import { getDb } from "@/lib/db";
+import { startExtraction } from "@/lib/extract-job";
 import {
   deletePolicyDocument,
   isCategory,
@@ -90,15 +90,10 @@ export async function rerunAiAction(form: FormData): Promise<void> {
   if (!Number.isInteger(documentId) || documentId <= 0) redirect("/?error=bad_document");
   if (!deepseekConfigured()) redirect("/?error=no_api_key");
 
-  let result = "done";
-  try {
-    const summary = await extractPolicyElements(documentId);
-    if (summary.status === "failed" || summary.status === "skipped") result = "failed";
-  } catch {
-    result = "failed";
-  }
+  // 抽取放到后台跑，页面先回去看进度；已经跑着的就不重复起
+  const started = startExtraction(documentId);
 
   revalidatePath("/");
   revalidatePath(`/documents/${documentId}`);
-  redirect(`/?ai=${result}`);
+  redirect(`/documents/${documentId}${started ? "?ai=started" : "?ai=running"}`);
 }

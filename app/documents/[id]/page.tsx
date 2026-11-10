@@ -1,8 +1,11 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { DocumentViewer } from "@/components/document-viewer";
+import { ExtractStatus } from "@/components/extract-status";
 import { resolveElementAction } from "@/app/policy-actions";
+import { readExtractProgress } from "@/lib/ai/extract";
 import { getDb } from "@/lib/db";
+import { extractionRunning } from "@/lib/extract-job";
 import {
   AMOUNT_CATEGORIES,
   CONDITION_CATEGORIES,
@@ -506,6 +509,11 @@ export default async function DocumentPage({
           </div>
         </div>
       </section>
+
+      <ExtractStatus
+        documentId={documentId}
+        initial={{ ...readExtractProgress(db, documentId), running: extractionRunning(documentId) }}
+      />
 
       {flatFacts.length > 0 || elementRows.length > 0 ? (
         <section id="quick" className="mb-8">

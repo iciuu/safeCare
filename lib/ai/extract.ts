@@ -74,6 +74,8 @@ export type ExtractSummary = {
   coverages: number;
   rejected: number;
   tokens: number;
+  /** 直接复用上次结果的批次数（断点续跑、重跑时省下的调用） */
+  reused: number;
   error?: string;
 };
 
@@ -656,9 +658,88 @@ function recordRun(
   ).run(documentId, DEEPSEEK_MODEL, PROMPT_VERSION, tokens, status, error ?? null);
 }
 
-export async function extractPolicyElements(documentId: number): Promise<ExtractSummary> {
+function startRun(db: DatabaseSync, documentId: number, batchesTotal: number): number {
+  const inserted = db
+    .prepare(
+      "INSERT INTO extraction_run (document_id, stage, engine, model, prompt_version, status, batches_total) VALUES (?, 'ai_extract', 'deepseek', ?, ?, 'running', ?)",
+    )
+    .run(documentId, DEEPSEEK_MODEL, PROMPT_VERSION, batchesTotal);
+  return Number(inserted.lastInsertRowid);
+}
+
+type CachedBatch = { batchIndex: number; pageFrom: number; pageTo: number; data: string };
+
+/**
+ * 已经抽成功的批次：按「页码区间」而不是批次序号匹配，
+ * 这样即使页面合并方式变了，区间一致的批次仍然能直接复用，不用重新花钱。
+ */
+export function loadCachedBatches(db: DatabaseSync, documentId: number): Map<string, CachedBatch> {
+  const rows = db
+    .prepare(
+      "SELECT batch_index, page_from, page_to, data FROM extract_batch WHERE document_id = ? AND prompt_version = ? AND status = 'succeeded' AND data <> ''",
+    )
+    .all(documentId, PROMPT_VERSION) as unknown as {
+    batch_index: number;
+    page_from: number;
+    page_to: number;
+    data: string;
+  }[];
+  const cache = new Map<string, CachedBatch>();
+  for (const row of rows) {
+    cache.set(`${row.page_from}-${row.page_to}`, {
+      batchIndex: Number(row.batch_index),
+      pageFrom: Number(row.page_from),
+      pageTo: Number(row.page_to),
+      data: row.data,
+    });
+  }
+  return cache;
+}
+
+/** 抽完的批次落盘：断点续跑靠它，重跑也能少花一次钱。 */
+function saveBatch(
+  db: DatabaseSync,
+  input: {
+    documentId: number;
+    batchIndex: number;
+    pageFrom: number;
+    pageTo: number;
+    status: "succeeded" | "failed";
+    data?: ExtractBundle;
+    tokens: number;
+    error?: string;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO extract_batch (document_id, prompt_version, batch_index, page_from, page_to, status, data, tokens, error, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(document_id, prompt_version, batch_index) DO UPDATE SET
+       page_from = excluded.page_from,
+       page_to = excluded.page_to,
+       status = excluded.status,
+       data = excluded.data,
+       tokens = excluded.tokens,
+       error = excluded.error,
+       updated_at = datetime('now')`,
+  ).run(
+    input.documentId,
+    PROMPT_VERSION,
+    input.batchIndex,
+    input.pageFrom,
+    input.pageTo,
+    input.status,
+    input.data ? JSON.stringify(input.data) : "",
+    input.tokens,
+    input.error ?? null,
+  );
+}
+
+export async function extractPolicyElements(
+  documentId: number,
+  options: { force?: boolean } = {},
+): Promise<ExtractSummary> {
   if (!deepseekConfigured()) {
-    return { status: "skipped", batches: 0, failedBatches: 0, elements: 0, coverages: 0, rejected: 0, tokens: 0 };
+    return { status: "skipped", batches: 0, failedBatches: 0, elements: 0, coverages: 0, rejected: 0, tokens: 0, reused: 0 };
   }
 
   const db = getDb();
@@ -667,7 +748,7 @@ export async function extractPolicyElements(documentId: number): Promise<Extract
     .all(documentId) as unknown as PageInput[];
 
   if (pages.length === 0) {
-    return { status: "skipped", batches: 0, failedBatches: 0, elements: 0, coverages: 0, rejected: 0, tokens: 0 };
+    return { status: "skipped", batches: 0, failedBatches: 0, elements: 0, coverages: 0, rejected: 0, tokens: 0, reused: 0 };
   }
 
   const redacted = redactPages(pages.map((page) => ({ page_no: Number(page.page_no), text: page.text })));
@@ -681,6 +762,7 @@ export async function extractPolicyElements(documentId: number): Promise<Extract
       coverages: 0,
       rejected: 0,
       tokens: 0,
+      reused: 0,
       error: "redaction_blocked",
     };
   }
@@ -691,27 +773,90 @@ export async function extractPolicyElements(documentId: number): Promise<Extract
   const policyId = policies?.id ?? null;
 
   const batches = buildBatches(redacted.pages).slice(0, MAX_BATCHES);
+
+  if (options.force) {
+    db.prepare("DELETE FROM extract_batch WHERE document_id = ? AND prompt_version = ?").run(documentId, PROMPT_VERSION);
+  }
+
+  const runId = startRun(db, documentId, batches.length);
+  const cache = loadCachedBatches(db, documentId);
   const startedAt = Date.now();
   let tokens = 0;
   let rejected = 0;
+  let processed = 0;
+  let reused = 0;
 
-  const results = await mapWithConcurrency(batches, CONCURRENCY, async (batch) => {
+  const bumpProgress = () => {
+    db.prepare("UPDATE extraction_run SET batches_done = ?, tokens = ? WHERE id = ?").run(processed, tokens, runId);
+  };
+
+  const finishRun = (status: string, error?: string) => {
+    db.prepare(
+      "UPDATE extraction_run SET status = ?, tokens = ?, error = ?, batches_done = ?, finished_at = datetime('now') WHERE id = ?",
+    ).run(status, tokens, error ?? null, processed, runId);
+  };
+
+  const results = await mapWithConcurrency(batches, CONCURRENCY, async (batch, index) => {
+    const pageFrom = batch[0].page_no;
+    const pageTo = batch[batch.length - 1].page_no;
+
+    // 上次已经抽成功、页码区间又对得上：直接用，不再请求模型
+    const hit = cache.get(`${pageFrom}-${pageTo}`);
+    if (hit) {
+      try {
+        const cached = JSON.parse(hit.data) as ExtractBundle;
+        processed += 1;
+        reused += 1;
+        bumpProgress();
+        return cached;
+      } catch {
+        // 缓存坏了当作没抽过
+      }
+    }
+
     if (Date.now() - startedAt > BUDGET_MS) return null;
     const body = batch.map((page) => `[[P:${page.page_no}]]\n${page.text}`).join("\n");
     const messages: ChatMessage[] = [
       { role: "system", content: systemPrompt() },
       { role: "user", content: body },
     ];
-    const result = await deepseekJson(messages, { timeoutMs: 70_000 });
-    tokens += result.tokens;
-    return normalizeBatchResult(result.data, batch, redacted.restore);
+    try {
+      const result = await deepseekJson(messages, { timeoutMs: 70_000 });
+      tokens += result.tokens;
+      const bundle = normalizeBatchResult(result.data, batch, redacted.restore);
+      saveBatch(db, {
+        documentId,
+        batchIndex: index,
+        pageFrom,
+        pageTo,
+        status: "succeeded",
+        data: bundle,
+        tokens: result.tokens,
+      });
+      processed += 1;
+      bumpProgress();
+      return bundle;
+    } catch (cause) {
+      saveBatch(db, {
+        documentId,
+        batchIndex: index,
+        pageFrom,
+        pageTo,
+        status: "failed",
+        tokens: 0,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+      processed += 1;
+      bumpProgress();
+      throw cause;
+    }
   });
 
   const successful = results.filter((item): item is ExtractBundle => item !== null);
   const failedBatches = batches.length - successful.length;
 
   if (successful.length === 0) {
-    recordRun(db, documentId, "failed", tokens, failedBatches > 0 ? "all_batches_failed" : "budget_exhausted");
+    finishRun("failed", failedBatches > 0 ? "all_batches_failed" : "budget_exhausted");
     return {
       status: "failed",
       batches: batches.length,
@@ -720,6 +865,7 @@ export async function extractPolicyElements(documentId: number): Promise<Extract
       coverages: 0,
       rejected: 0,
       tokens,
+      reused,
       error: "all_batches_failed",
     };
   }
@@ -761,11 +907,8 @@ export async function extractPolicyElements(documentId: number): Promise<Extract
 
   // 冲突字段不算错，但要让用户看得见：记一条，不阻断入库
   persist(db, documentId, policyId, merged.meta, coverages, rows);
-  recordRun(
-    db,
-    documentId,
+  finishRun(
     failedBatches > 0 ? "partial" : "succeeded",
-    tokens,
     merged.conflicts.length > 0 ? `conflict_fields:${merged.conflicts.join(",")}` : undefined,
   );
 
@@ -777,6 +920,94 @@ export async function extractPolicyElements(documentId: number): Promise<Extract
     coverages: coverages.length,
     rejected,
     tokens,
+    reused,
+  };
+}
+
+export type ExtractProgress = {
+  status: string | null;
+  promptVersion: string | null;
+  model: string | null;
+  /** 本次抽取切出来的批次数（最近一次运行） */
+  batches: number;
+  done: number;
+  failedBatches: number;
+  pendingBatches: number;
+  tokens: number;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  elements: number;
+  coverages: number;
+  /** 有未完成的批次，可以接着抽 */
+  canResume: boolean;
+};
+
+/** 进度不看内存里的状态，只看库：进程重启、浏览器刷新都能接着看。 */
+export function readExtractProgress(db: DatabaseSync, documentId: number): ExtractProgress {
+  const run = db
+    .prepare(
+      "SELECT status, prompt_version, model, tokens, error, batches_total, batches_done, started_at, finished_at FROM extraction_run WHERE document_id = ? AND stage = 'ai_extract' ORDER BY id DESC LIMIT 1",
+    )
+    .get(documentId) as
+    | {
+        status: string;
+        prompt_version: string | null;
+        model: string | null;
+        tokens: number | null;
+        error: string | null;
+        batches_total: number;
+        batches_done: number;
+        started_at: string;
+        finished_at: string | null;
+      }
+    | undefined;
+
+  const counts = db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+         SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS ok,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS bad
+       FROM extract_batch WHERE document_id = ? AND prompt_version = ?`,
+    )
+    .get(documentId, PROMPT_VERSION) as unknown as { total: number; ok: number | null; bad: number | null };
+
+  const elements = (
+    db
+      .prepare("SELECT COUNT(*) AS n FROM policy_element WHERE document_id = ? AND source = 'ai'")
+      .get(documentId) as { n: number }
+  ).n;
+  const coverages = (
+    db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM coverage c JOIN policy p ON p.id = c.policy_id WHERE p.document_id = ? AND c.source = 'ai'",
+      )
+      .get(documentId) as { n: number }
+  ).n;
+
+  const total = Number(counts?.total ?? 0);
+  const ok = Number(counts?.ok ?? 0);
+  const bad = Number(counts?.bad ?? 0);
+  const batches = run ? Number(run.batches_total) : 0;
+  const done = run ? Number(run.batches_done) : ok + bad;
+  const status = run?.status ?? null;
+
+  return {
+    status,
+    promptVersion: run?.prompt_version ?? null,
+    model: run?.model ?? null,
+    batches,
+    done,
+    failedBatches: bad,
+    pendingBatches: Math.max(0, total - ok - bad),
+    tokens: Number(run?.tokens ?? 0),
+    error: run?.error ?? null,
+    startedAt: run?.started_at ?? null,
+    finishedAt: run?.finished_at ?? null,
+    elements,
+    coverages,
+    // 除了正在跑，只要有失败或没抽的批次就可以接着抽；没配 key 时前端另有提示
+    canResume: status !== "running" && (bad > 0 || (batches > 0 && ok < batches)),
   };
 }
 

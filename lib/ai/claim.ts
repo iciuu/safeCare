@@ -103,6 +103,16 @@ function situationBlock(input: EstimateInput, context: ClaimContext): string {
     `- 本保险期间已累计赔付：${money(input.paidThisYear)} 元`,
   ];
   if (input.annualLimit !== null) lines.push(`- 每一保险期间累计给付限额：${money(input.annualLimit)} 元`);
+
+  // 分项限额和给付比例表也要告诉模型，否则两边算出来的口径对不上
+  for (const item of input.subLimits ?? []) {
+    if (item.amount <= 0 || item.limit <= 0) continue;
+    lines.push(`- 分项限额：${item.label} 合同单独限额 ${money(item.limit)} 元，本次该类费用 ${money(item.amount)} 元`);
+  }
+  if (typeof input.flatRatio === "number") {
+    lines.push(`- 给付比例表：投保人按条款附表查到的比例是 ${input.flatRatio}%（按保额 × 比例给付）`);
+  }
+
   return ["【本次情况】", ...lines].join("\n");
 }
 

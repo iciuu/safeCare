@@ -66,6 +66,16 @@ export type EstimateInput = {
   /** 本保险期间已累计赔付 */
   paidThisYear: number;
   annualLimit: number | null;
+  /**
+   * 分项限额：合同对某一类费用单独设的累计限额。
+   * amount 是「这次这笔费用里属于该类别的金额」，超出 limit 的部分不能计入可赔金额。
+   */
+  subLimits?: { label: string; limit: number; amount: number }[];
+  /**
+   * 给付比例表型责任（骨折、关节脱位、残疾、烧伤）：用户按条款附表查到的比例，0~1。
+   * 给了就按「保额 × 比例」算；不给就只展示保额，不替用户猜比例。
+   */
+  flatRatio?: number | null;
 };
 
 export type EstimatePart = {
@@ -388,12 +398,43 @@ export function computeEstimate(
     });
   }
 
-  const base = Math.max(0, round2(input.totalCost - input.socialPaid - input.otherPaid));
+  // 分项限额：超出该类限额的部分不能计入可赔金额，先剔掉再按比例算
+  const subLimits = (input.subLimits ?? []).filter((item) => item.limit > 0 && item.amount > 0);
+  let subExcess = 0;
+  for (const item of subLimits) {
+    const excess = Math.max(0, round2(item.amount - item.limit));
+    if (excess <= 0) continue;
+    subExcess += excess;
+    notes.push(
+      `这里填的「${item.label}」是 ${formatMoney(item.amount)} 元，合同对这一项单独限额 ${formatMoney(
+        item.limit,
+      )} 元，超出的 ${formatMoney(excess)} 元不计入可赔金额。`,
+    );
+  }
+
+  const base = Math.max(0, round2(input.totalCost - input.socialPaid - input.otherPaid - subExcess));
   const parts: EstimatePart[] = [];
   let gross = 0;
+  const flatRatio =
+    typeof input.flatRatio === "number" && Number.isFinite(input.flatRatio)
+      ? clamp(input.flatRatio > 1 ? input.flatRatio / 100 : input.flatRatio, 0, 1)
+      : null;
 
   if (blockers.length === 0) {
-    if (base <= 0) {
+    if (flatRatio !== null && typeof benefit.cap === "number" && benefit.cap > 0) {
+      // 给付比例表型：这一项给的是「保额 × 比例」，不跟实际花费走
+      const amount = round2(benefit.cap * flatRatio);
+      parts.push({
+        label: `保额 × ${Math.round(flatRatio * 100)}%`,
+        portion: benefit.cap,
+        ratio: flatRatio,
+        amount,
+      });
+      gross = amount;
+      notes.push(
+        "这项责任按《给付比例表》的比例乘保额，比例是你对照条款附表查出来填的，这里没有替你猜。",
+      );
+    } else if (base <= 0) {
       notes.push("扣掉已获得的补偿后没有余额，这一笔没有可赔的金额。");
     } else {
       const hasNoSocial = benefit.tiers.some((tier) => tier.noSocialRatio !== null);

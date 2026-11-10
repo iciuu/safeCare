@@ -222,3 +222,69 @@ test("没有附表时给出核对提示", () => {
   assert.equal(plan.benefits.length, 0);
   assert.equal(plan.notes.length, 1);
 });
+
+test("分项限额：超出该类限额的部分不计入可赔金额", () => {
+  // 3.2 万费用里 2.4 万是耐用医疗设备，合同对这一项单独限 2 万元，超出的 4 千剔掉
+  const result = computeEstimate(
+    input({ totalCost: 32_000, subLimits: [{ label: "耐用医疗设备费用", limit: 20_000, amount: 24_000 }] }),
+    general,
+    refs,
+  );
+  assert.equal(result.base, 16_000);
+  assert.ok(result.notes.some((note) => note.includes("耐用医疗设备费用")));
+});
+
+test("分项限额：没超过限额时不影响基数", () => {
+  const result = computeEstimate(
+    input({ totalCost: 32_000, subLimits: [{ label: "耐用医疗设备费用", limit: 20_000, amount: 8_000 }] }),
+    general,
+    refs,
+  );
+  assert.equal(result.base, 20_000);
+  assert.ok(!result.notes.some((note) => note.includes("不计入可赔金额")));
+});
+
+test("分项限额：超出限额时按超出部分扣，不是整类扣掉", () => {
+  const result = computeEstimate(
+    input({ totalCost: 50_000, socialPaid: 0, subLimits: [{ label: "耐用医疗设备费用", limit: 20_000, amount: 28_000 }] }),
+    general,
+    refs,
+  );
+  assert.equal(result.base, 42_000);
+});
+
+test("给付比例表：按保额 × 用户查到的比例算", () => {
+  const fracture: EstimateBenefit = {
+    key: "fracture",
+    name: "意外伤害骨折、关节脱位",
+    scopes: ["普通部"],
+    source: "table",
+    tiers: [],
+    cap: 3_000,
+  };
+  const result = computeEstimate(
+    input({ benefitKey: "fracture", totalCost: 5_000, socialPaid: 0, annualLimit: null, flatRatio: 10 }),
+    fracture,
+    refs,
+  );
+  assert.equal(result.payable, 300);
+  assert.ok(result.notes.some((note) => note.includes("给付比例表")));
+});
+
+test("给付比例表：没填比例时不给数字", () => {
+  const fracture: EstimateBenefit = {
+    key: "fracture",
+    name: "意外伤害骨折、关节脱位",
+    scopes: ["普通部"],
+    source: "table",
+    tiers: [],
+    cap: 3_000,
+  };
+  const result = computeEstimate(
+    input({ benefitKey: "fracture", totalCost: 5_000, socialPaid: 0, annualLimit: null }),
+    fracture,
+    refs,
+  );
+  assert.equal(result.payable, 0);
+  assert.ok(!result.notes.some((note) => note.includes("给付比例表")));
+});

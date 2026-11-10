@@ -13,4 +13,8 @@ export type ClaimRequest = {
   /** 免责情形在列表中的下标；null = 未命中 */
   exclusionIndex: number | null;
   paid: number;
+  /** 分项限额：本次费用中属于该类的金额 */
+  subLimits?: { label: string; limit: number; amount: number }[];
+  /** 给付比例表型责任：用户按附表查到的比例（%），null = 未填 */
+  flatRatio?: number | null;
 };

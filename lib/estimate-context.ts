@@ -9,6 +9,7 @@ import {
   type EstimateRefs,
 } from "./estimate";
 import type { ClaimClause } from "./ai/claim";
+import { extractSubLimits, type SubLimit, type SubLimitSource } from "./sub-limits";
 
 export const REF_CLAUSES = ["附表1", "2.3", "2.4", "2.5", "2.6", "3.1"] as const;
 
@@ -27,6 +28,8 @@ export type EstimateContext = {
   clauses: ClaimClause[];
   /** 附表里是否真的出现了这些条款，用来给 AI 提示上下文是否完整 */
   clauseCount: number;
+  /** 合同对某一类费用单独设的限额（如「耐用医疗设备费用累计 2 万」） */
+  subLimits: SubLimit[];
 };
 
 function parseJson<T>(raw: string, fallback: T): T {
@@ -119,6 +122,10 @@ export function loadEstimateContext(db: DatabaseSync, documentId: number): Estim
       }))
     : [];
 
+  const subLimitRows = db
+    .prepare("SELECT clause_no, page_from, text FROM clause WHERE document_id = ? ORDER BY seq")
+    .all(documentId) as unknown as SubLimitSource[];
+
   return {
     document,
     productName: policyRow?.product_name ?? null,
@@ -132,5 +139,6 @@ export function loadEstimateContext(db: DatabaseSync, documentId: number): Estim
     exclusions,
     clauses: clauseRows,
     clauseCount: clauseRows.length,
+    subLimits: extractSubLimits(subLimitRows),
   };
 }

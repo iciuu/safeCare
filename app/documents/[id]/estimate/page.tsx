@@ -55,6 +55,24 @@ export default async function EstimatePage({
   const catalogText = field("catalog").trim();
   const exclusionValue = field("exclusion");
   const exclusionIndex = exclusionValue === "" ? null : Number(exclusionValue);
+  // 分项限额：只取合同里真解析出来的类别，金额由用户按本次费用拆分填
+  const subLimitRows = context.subLimits.slice(0, 4).map((item, index) => ({
+    label: item.label,
+    limit: item.limit,
+    kind: item.kind,
+    page: item.page,
+    clauseNo: item.clauseNo,
+    amount: toAmount(field(`sub${index}`)),
+  }));
+  const subLimitsFilled = subLimitRows
+    .filter((item) => item.kind === "total" && item.amount > 0)
+    .map((item) => ({ label: item.label, limit: item.limit, amount: item.amount }));
+
+  // 骨折、关节脱位、残疾、烧伤这类责任按《给付比例表》乘保额，比例表通常不在正文里
+  const ratioTableBenefit = /骨折|关节脱位|残疾|烧伤|伤残/.test(benefit?.name ?? "");
+  const flatRatioText = field("flatRatio").trim();
+  const flatRatio = flatRatioText === "" ? null : toAmount(flatRatioText);
+
   const exclusionText =
     exclusionIndex === null || !Number.isInteger(exclusionIndex)
       ? null
@@ -76,6 +94,8 @@ export default async function EstimatePage({
             exclusion: exclusionText,
             paidThisYear: toAmount(field("paid")),
             annualLimit: context.annualLimit,
+            subLimits: subLimitsFilled,
+            flatRatio,
           },
           benefit,
           context.refs,
@@ -95,6 +115,8 @@ export default async function EstimatePage({
           waiting: inWaiting,
           exclusionIndex: exclusionIndex !== null && Number.isInteger(exclusionIndex) ? exclusionIndex : null,
           paid: toAmount(field("paid")),
+          subLimits: subLimitsFilled,
+          flatRatio,
         }
       : null;
 
@@ -231,6 +253,40 @@ export default async function EstimatePage({
                   className={fieldClass}
                 />
               </label>
+
+              {ratioTableBenefit ? (
+                <label className="text-xs text-slate-600">
+                  按《给付比例表》查到的比例（%）
+                  <input
+                    name="flatRatio"
+                    defaultValue={field("flatRatio")}
+                    inputMode="decimal"
+                    placeholder="如 10"
+                    className={fieldClass}
+                  />
+                  <span className="mt-0.5 block text-[11px] text-slate-400">
+                    这项按「保额 × 比例」给，比例表在条款附表里，这里不替你猜
+                  </span>
+                </label>
+              ) : null}
+
+              {subLimitRows.map((item, index) =>
+                item.kind === "total" ? (
+                  <label key={item.label} className="text-xs text-slate-600">
+                    其中：{item.label}（元）
+                    <input
+                      name={`sub${index}`}
+                      defaultValue={field(`sub${index}`)}
+                      inputMode="decimal"
+                      className={fieldClass}
+                    />
+                    <span className="mt-0.5 block text-[11px] text-slate-400">
+                      合同对这一项单独限额 {formatMoney(item.limit)} 元 · P{item.page}
+                      {item.clauseNo ? ` · ${item.clauseNo}` : ""}
+                    </span>
+                  </label>
+                ) : null,
+              )}
             </div>
 
             <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -351,7 +407,7 @@ export default async function EstimatePage({
               ) : null}
 
               <p className="mt-3 border-t border-slate-100 pt-2 text-xs text-slate-400">
-                只按条款文字算，没考虑医院等级、合理且必要性的核定和单项限额（如住院耐用医疗设备 2 万元）；实际赔付以保险公司核定为准。
+                只按条款文字算：医院等级、合理且必要性的核定没建模；分项限额只认合同里明写的那几项，没填金额的类别没扣。实际赔付以保险公司核定为准。
               </p>
             </section>
           ) : null}

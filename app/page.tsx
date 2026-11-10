@@ -114,6 +114,9 @@ export default async function PolicyManagementPage({
               {policies.length} 份 · 共 {totalPages} 页
               {totalReview > 0 ? ` · ${totalReview} 处待复核` : ""}
             </span>
+            <Link href="/family" className="text-sky-700 underline decoration-dotted underline-offset-2">
+              家庭总览
+            </Link>
             <Link href="/stack" className="text-sky-700 underline decoration-dotted underline-offset-2">
               几张保单一起算
             </Link>

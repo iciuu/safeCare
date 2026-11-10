@@ -150,6 +150,22 @@ CREATE TABLE IF NOT EXISTS extraction_run (
 );
 
 -- 脱敏映射只存本机，不随请求发送（docs/PLAN.md §8.1）
+CREATE TABLE IF NOT EXISTS extract_batch (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER NOT NULL REFERENCES document(id) ON DELETE CASCADE,
+  prompt_version TEXT NOT NULL,
+  batch_index INTEGER NOT NULL,
+  page_from INTEGER NOT NULL,
+  page_to INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  data TEXT NOT NULL DEFAULT '',
+  tokens INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (document_id, prompt_version, batch_index)
+);
+
+-- 脱敏映射只存本机，不随请求发送（docs/PLAN.md §8.1）
 CREATE TABLE IF NOT EXISTS redaction_map (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   document_id INTEGER NOT NULL REFERENCES document(id) ON DELETE CASCADE,
@@ -229,6 +245,9 @@ export function getDb(): DatabaseSync {
   ensureColumn(db, "term", "source", "source TEXT NOT NULL DEFAULT 'rules'");
   // 责任行同样分 ai / rules 两层：AI 那层整批替换，规则那层留着兜底
   ensureColumn(db, "coverage", "source", "source TEXT NOT NULL DEFAULT 'rules'");
+  // 抽取进度：分批计数写在 run 上，页面据此显示「抽到第几批 / 共几批」
+  ensureColumn(db, "extraction_run", "batches_total", "batches_total INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "extraction_run", "batches_done", "batches_done INTEGER NOT NULL DEFAULT 0");
 
   // 老库里没有 clause_ai / policy_element，建表语句是幂等的，每次取连接补一下
   db.exec(`CREATE TABLE IF NOT EXISTS policy_element (
@@ -261,6 +280,22 @@ export function getDb(): DatabaseSync {
   before_json TEXT NOT NULL DEFAULT '{}',
   after_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);`);
+
+  // 抽完的批次留着：同一份文件重跑或上次中断后继续时，已成功的批次直接复用，不再花一次钱
+  db.exec(`CREATE TABLE IF NOT EXISTS extract_batch (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER NOT NULL REFERENCES document(id) ON DELETE CASCADE,
+  prompt_version TEXT NOT NULL,
+  batch_index INTEGER NOT NULL,
+  page_from INTEGER NOT NULL,
+  page_to INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  data TEXT NOT NULL DEFAULT '',
+  tokens INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (document_id, prompt_version, batch_index)
 );`);
 
   db.exec(`CREATE TABLE IF NOT EXISTS clause_ai (
