@@ -115,8 +115,12 @@ export function extractTocEntries(pages: PageText[]): TocEntry[] {
     const raw = block
       .slice(from, to)
       .replace(/\s+/g, "")
+      // 两列排版会把下一章的条目挤到同一行：`1.1 基本保险金额5.如何退保`
+      .replace(/\d{1,2}\.(?=[^\d.])[\s\S]*$/, "")
       .replace(/\d+$/, "")
-      .replace(/^[，。、；：]/, "");
+      .replace(/^[，。、；：]/, "")
+      // 标题被两栏挤断时尾巴会留一个顿号
+      .replace(/[，。、；：]+$/, "");
 
     const usable = raw.length >= 2 && raw.length <= 20 && !/[。；]/.test(raw) && !/\d/.test(raw);
     entries.push({ no, title: usable ? raw : null });

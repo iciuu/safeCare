@@ -115,6 +115,11 @@ export default async function PolicyManagementPage({
               {policies.length} 份 · 共 {totalPages} 页
               {totalReview > 0 ? ` · ${totalReview} 处待复核` : ""}
             </span>
+            {totalReview > 0 ? (
+              <Link href="/review" className="text-amber-700 underline decoration-dotted underline-offset-2">
+                集中复核 {totalReview} 处
+              </Link>
+            ) : null}
             <Link href="/family" className="text-sky-700 underline decoration-dotted underline-offset-2">
               家庭总览
             </Link>

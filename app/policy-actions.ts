@@ -120,9 +120,15 @@ export async function resolveElementAction(form: FormData): Promise<void> {
     condition: raw("condition"),
   });
 
+  // 集中复核页处理完还要回到队列里下一条，所以允许指定站内回跳地址
+  const back = String(form.get("returnTo") ?? "");
+  const safeBack = back.startsWith("/") && !back.startsWith("//") ? back : null;
+
   revalidatePath("/");
+  revalidatePath("/review");
   revalidatePath(`/documents/${documentId}`);
-  redirect(`/documents/${documentId}${ok ? "?reviewed=1" : "?error=not_found"}#review`);
+  if (!ok) redirect(`/documents/${documentId}?error=not_found#review`);
+  redirect(safeBack ?? `/documents/${documentId}?reviewed=1#review`);
 }
 
 /** AI 提要点出问题时不阻塞管理页，只把状态写回 URL。 */

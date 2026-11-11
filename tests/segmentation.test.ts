@@ -187,6 +187,129 @@ test("编号与正文挤在同一行时也能切分（真实排版）", () => {
   assert.ok(c12?.text.includes("生效本合同成立"));
 });
 
+test("没有条款册页眉时按编号序列切（华贵这类）", () => {
+  // 排版特点：没有「条款正文第 N 页」页眉，标题拉开字距且与正文连排
+  const huagui: PageText[] = [
+    {
+      page_no: 13,
+      text: `条款目录
+1.我们保什么、保多久4.7 诉讼时效
+1.1 基本保险金额5.如何退保
+1.2 保险责任
+1.3 保险期间5.1 犹豫期
+2.1 责任免除
+2.2 其他免责条款6.3 拆分选择权`,
+      headings: [{ t: "条款目录", s: 25.9 }],
+    },
+    {
+      page_no: 14,
+      text: `华贵大麦甜蜜家 2021 定期寿险条款
+1.我们保什么、保多久
+这部分讲的是我们提供的保障以及我们提供保障的期间。
+1.1基 本 保 险本合同基本保险金额由您和本公司在投保时约定。
+本保险金额的，则我们将按减少后的基本保险金额承担责任。
+1.2保险责任在本合同保险期间内，我们承担下列保险责任：
+第一身故或身体全残保险金
+1.3 保险期间 本合同的保险期间由您在投保时与我们约定。`,
+      headings: [
+        { t: "华贵大麦甜蜜家 2021 定期寿险条款", s: 13.9 },
+        { t: "1.我们保什么、保多久", s: 12 },
+        { t: "1.2保险责任在本合同保险期间内，我们承担下列保险责任：", s: 10.6 },
+      ],
+      body_size: 9.1,
+    },
+    {
+      page_no: 15,
+      text: `2.1 责任免除 因下列情形之一导致被保险人身故的，我们不承担保险责任：
+2.2其 他 免 责除“2.1 责任免除”外，本合同中还有一些免除本公司责任的条款。`,
+      headings: [{ t: "2.2其 他 免 责除…", s: 10.6 }],
+      body_size: 10.6,
+    },
+  ];
+
+  const result = segmentPolicy(
+    huagui,
+    new Map([
+      ["1.1", "基本保险金额"],
+      ["1.2", "保险责任"],
+      ["1.3", "保险期间"],
+      ["2.1", "责任免除"],
+      ["2.2", "其他免责条款"],
+    ]),
+  );
+
+  assert.deepEqual(
+    result.clauses.map((clause) => clause.clause_no),
+    ["1.1", "1.2", "1.3", "2.1", "2.2"],
+  );
+  // 目录页不能被当成条款切一遍
+  assert.equal(result.clauses[0].page_from, 14);
+  assert.equal(result.clauses[0].heading, "基本保险金额");
+  assert.equal(result.clauses[3].category, "exclusion");
+  assert.equal(result.clauses[4].page_from, 15);
+});
+
+test("「第X条」条款册按条切，条内的 1.1 不单独成条", () => {
+  const zhaoshang: PageText[] = [
+    {
+      page_no: 10,
+      text: `条款目录
+第一章第一条 基本保险金额
+第二章第五条 责任免除`,
+    },
+    {
+      page_no: 11,
+      text: `第一章 我们保什么、保多久
+第一条 基本保险金额
+本主险合同基本保险金额由您和我们在投保时约定。
+第二条 保险责任
+本主险合同基本保险金额的三倍给付。
+1.1 这一段是条下文，不单独成条。
+第三条 投保范围
+零周岁至十七周岁。`,
+    },
+  ];
+
+  const result = segmentPolicy(zhaoshang);
+  assert.deepEqual(
+    result.clauses.map((clause) => clause.clause_no),
+    ["第一条", "第二条", "第三条"],
+  );
+  assert.equal(result.clauses[0].heading, "基本保险金额");
+  assert.equal(result.clauses[1].category, "coverage");
+  assert.ok(result.clauses[1].text.includes("1.1 这一段是条下文"));
+  assert.equal(result.clauses[0].page_from, 11);
+});
+
+test("同一份 PDF 里的附加险条款另起一册，不并进上一条", () => {
+  const ddh: PageText[] = [
+    {
+      page_no: 11,
+      text: `第一部分 共同条款
+第一条 保险合同的构成
+1.1 本合同由保险单、条款等构成。
+第二条 保险责任
+2.1 我们按约定给付。`,
+    },
+    {
+      page_no: 18,
+      text: `附加保险合同
+第一条 附加保险合同的构成
+1.1 本附加合同必须附加于主合同。
+第二条 保险责任
+2.1 我们承担重大疾病保险责任。`,
+    },
+  ];
+
+  const result = segmentPolicy(ddh);
+  assert.deepEqual(
+    result.clauses.map((clause) => clause.clause_no),
+    ["第一条", "第二条", "附加第一条", "附加第二条"],
+  );
+  assert.ok(result.clauses[3].text.includes("重大疾病保险责任"));
+  assert.equal(result.clauses[2].page_from, 18);
+});
+
 test("不是合同条款的 PDF 返回空结果，不误切", () => {
   const result = segmentPolicy([{ page_no: 1, text: "招标文件\n1 总则\n本项目不接受联合体投标。" }]);
   assert.equal(result.stats.found_book, false);

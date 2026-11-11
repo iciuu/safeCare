@@ -967,10 +967,13 @@ export default async function DocumentPage({
                   {aiKind ? (
                     <span className="shrink-0 rounded bg-sky-50 px-1 py-0.5 text-sky-700">AI</span>
                   ) : null}
-                  <span className="w-14 shrink-0 text-right text-slate-400">
+                  <a
+                    href={`/documents/${documentId}?p=${clause.page_from}#doc`}
+                    className="w-14 shrink-0 text-right text-sky-700 underline decoration-dotted underline-offset-2"
+                  >
                     P{clause.page_from}
                     {clause.page_to !== clause.page_from ? `-${clause.page_to}` : ""}
-                  </span>
+                  </a>
                 </li>
               );
             })}

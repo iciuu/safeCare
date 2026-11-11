@@ -29,12 +29,19 @@ function loadPdfjs(): PdfJsModule {
   return cachedPdfjs;
 }
 
+/** 一行文字 + 它的字号（同一行里取最大，标题常比正文大半号） */
+export type TextLine = { text: string; size: number };
+
 export type ExtractedPage = {
   page_no: number;
   width: number;
   height: number;
   text: string;
   char_count: number;
+  /** 本页正文的常见字号，用来判断哪几行是标题 */
+  body_size: number;
+  /** 明显大于正文的行：条款标题、章标题多半在这里 */
+  headings: { t: string; s: number }[];
 };
 
 export type ExtractedPdf = {
@@ -232,7 +239,7 @@ async function recoverFormText(pdf: PDFDocument, pageIndex: number): Promise<Fra
  * 把 pdfjs 的 text item 还原成行：同一基线的碎片按 x 排序拼接。
  * 中文 PDF 常把每个字拆成一个 item，所以拼接时不能补空格。
  */
-function itemsToText(items: PdfTextItem[], extra: Frag[] = []): string {
+function layoutLines(items: PdfTextItem[], extra: Frag[] = []): TextLine[] {
   const frags: Frag[] = [...extra];
 
   for (const item of items) {
@@ -245,7 +252,7 @@ function itemsToText(items: PdfTextItem[], extra: Frag[] = []): string {
     });
   }
 
-  if (frags.length === 0) return "";
+  if (frags.length === 0) return [];
 
   frags.sort((a, b) => b.y - a.y || a.x - b.x);
 
@@ -261,14 +268,45 @@ function itemsToText(items: PdfTextItem[], extra: Frag[] = []): string {
   }
 
   return lines
-    .map((line) =>
-      line
-        .sort((a, b) => a.x - b.x)
-        .map((f) => f.str)
-        .join("")
-        .replace(/[ \t]+$/g, ""),
-    )
-    .join("\n");
+    .map((line) => {
+      const sorted = line.sort((a, b) => a.x - b.x);
+      return {
+        text: sorted
+          .map((f) => f.str)
+          .join("")
+          .replace(/[ \t]+$/g, ""),
+        size: Math.max(...sorted.map((f) => f.h)),
+      };
+    })
+    .filter((line) => line.text.trim().length > 0);
+}
+
+/** 字符加权的中位字号：一页里正文占绝大多数，页眉页脚砍不掉也不影响 */
+function bodySizeOf(lines: TextLine[]): number {
+  const buckets = new Map<number, number>();
+  for (const line of lines) {
+    const key = Math.round(line.size * 10) / 10;
+    buckets.set(key, (buckets.get(key) ?? 0) + line.text.length);
+  }
+  const total = [...buckets.values()].reduce((sum, n) => sum + n, 0);
+  if (total === 0) return 0;
+  let seen = 0;
+  for (const [size, chars] of [...buckets.entries()].sort((a, b) => a[0] - b[0])) {
+    seen += chars;
+    if (seen >= total / 2) return size;
+  }
+  return lines[0]?.size ?? 0;
+}
+
+/**
+ * 标题行：字号至少比正文大 12%，且不是整段正文（一行超过 40 字基本是正文折行）。
+ * 这不是用来「猜」的，只是给切分器一个额外的证据，认不出标题时仍然不切。
+ */
+function headingLinesOf(lines: TextLine[], bodySize: number): { t: string; s: number }[] {
+  if (!bodySize) return [];
+  return lines
+    .filter((line) => line.size >= bodySize * 1.12 + 0.2 && line.text.trim().length <= 40)
+    .map((line) => ({ t: line.text.trim(), s: Math.round(line.size * 10) / 10 }));
 }
 
 export async function extractPdf(bytes: Uint8Array): Promise<ExtractedPdf> {
@@ -290,7 +328,9 @@ export async function extractPdf(bytes: Uint8Array): Promise<ExtractedPdf> {
       const viewport = page.getViewport({ scale: 1 });
       const content = await page.getTextContent();
       const formFrags = structure ? await recoverFormText(structure, pageNo - 1).catch(() => []) : [];
-      const text = itemsToText(content.items, formFrags);
+      const lines = layoutLines(content.items, formFrags);
+      const text = lines.map((line) => line.text).join("\n");
+      const bodySize = bodySizeOf(lines);
 
       pages.push({
         page_no: pageNo,
@@ -298,6 +338,8 @@ export async function extractPdf(bytes: Uint8Array): Promise<ExtractedPdf> {
         height: viewport.height,
         text,
         char_count: text.replace(/\s/g, "").length,
+        body_size: bodySize,
+        headings: headingLinesOf(lines, bodySize),
       });
 
       page.cleanup();
