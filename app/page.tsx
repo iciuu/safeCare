@@ -126,6 +126,9 @@ export default async function PolicyManagementPage({
             <Link href="/stack" className="text-sky-700 underline decoration-dotted underline-offset-2">
               几张保单一起算
             </Link>
+            <Link href="/ask" className="text-sky-700 underline decoration-dotted underline-offset-2">
+              问条款
+            </Link>
           </p>
         </div>
 
