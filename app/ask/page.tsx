@@ -28,7 +28,11 @@ export default async function AskPage({
 
   return (
     <main className="mx-auto max-w-3xl px-6 py-12">
-      <header className="mb-8">
+      <Link href="/" className="text-xs text-slate-500 hover:text-slate-900">
+        ← 返回保单管理
+      </Link>
+
+      <header className="mt-4 mb-8">
         <p className="text-xs font-medium uppercase tracking-[0.2em] text-emerald-700">safeCare</p>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight">问条款</h1>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
